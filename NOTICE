@@ -1,0 +1,11 @@
+horizon-discordsrv
+
+Derived from DiscordSRV (https://github.com/DiscordSRV/DiscordSRV), licensed under the GNU
+General Public License, version 3 or (at your option) any later version. The full text is in
+LICENSE.
+
+Copyright (C) 2016 - 2024 Austin "Scarsz" Shapiro and the DiscordSRV contributors
+(authors listed by the project: Scarsz, Androkai, Vankka).
+
+This port rewrites DiscordSRV's behaviour in Rust for the Horizon server. It is not affiliated
+with, or endorsed by, the DiscordSRV project. Changes are recorded in the git history.
