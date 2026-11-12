@@ -14,17 +14,19 @@ pub mod format;
 pub mod gateway;
 pub mod guild;
 pub mod linking;
+pub mod original;
 pub mod relay;
 pub mod rest;
 pub mod server;
 pub mod ws;
+pub mod yaml;
 
 use std::path::PathBuf;
 use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -33,6 +35,10 @@ use chrono::Local;
 
 use config::Config;
 pub use server::Player;
+
+/// Environment variable that points Discord's REST base at a local fake for tests. Not for a live server:
+/// the bot token is sent to whatever it names.
+pub const API_BASE_ENV: &str = "HORIZON_DISCORDSRV_API_BASE";
 
 /// Console lines kept while Discord is slow; older ones are dropped past this.
 const MAX_PENDING_LINES: usize = 5000;
@@ -64,6 +70,8 @@ pub struct Shared {
     pub server: server::ServerInfo,
     pub version: String,
     chat_filters: chat::ChatFilters,
+    /// Which `DiscordGameStatus` entry the presence shows (see `gateway::status_entry`).
+    pub status_index: AtomicUsize,
     state: Mutex<State>,
     jobs: Mutex<VecDeque<relay::Job>>,
     to_game: Mutex<TickWork>,
@@ -196,26 +204,55 @@ pub fn start(config_dir: &Path, server_version: String) {
 fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: String) -> bool {
     let dir = config_dir.join("discordsrv");
     let path = dir.join("config.toml");
-    if !path.exists() {
-        let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(&path, config::DEFAULT_CONFIG));
-    }
-    let config = match fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Config::parse(&t)) {
-        Ok(c) => c,
+    // The original DiscordSRV files (`plugins/DiscordSRV/config.yml` in the server folder, the
+    // engine's working directory, read as they are) win; the TOML file is the fallback.
+    let original_dir = std::env::current_dir().unwrap_or_default().join("plugins").join("DiscordSRV");
+    let (mut config, yaml_token, source) = match original::load(&original_dir) {
+        Ok(Some(o)) => {
+            for feature in &o.unported {
+                log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Switched on in the original, not ported: {feature}");
+            }
+            (o.config, o.token, original_dir.join("config.yml"))
+        }
+        Ok(None) => {
+            if !path.exists() {
+                let _ = fs::create_dir_all(&dir).and_then(|()| fs::write(&path, config::DEFAULT_CONFIG));
+            }
+            match fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Config::parse(&t)) {
+                Ok(c) => (c, String::new(), path.clone()),
+                Err(e) => {
+                    log::error!(target: "horizon_discordsrv", "[DiscordSRV] {}: {e}", path.display());
+                    return false;
+                }
+            }
+        }
         Err(e) => {
-            log::error!(target: "horizon_discordsrv", "[DiscordSRV] {}: {e}", path.display());
+            log::error!(target: "horizon_discordsrv", "[DiscordSRV] Original config not read ({e}): not connecting");
             return false;
         }
     };
+    if let Some(base) = std::env::var(API_BASE_ENV).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+        log::warn!(target: "horizon_discordsrv", "[DiscordSRV] {API_BASE_ENV} is set: REST calls go to the test endpoint");
+        config.api_base_url = base;
+    }
+    if config.discord_console_channel_padding > 0 {
+        log::warn!(target: "horizon_discordsrv", "[DiscordSRV] DiscordConsoleChannelPadding is not applied (see GAPS.md)");
+    }
     let console_on = !config.discord_console_channel_id.trim().is_empty();
     if !console_on && !config.chat.has_channels() {
-        log::info!(target: "horizon_discordsrv", "[DiscordSRV] No console or chat channel set in {}: not connecting", path.display());
+        log::info!(target: "horizon_discordsrv", "[DiscordSRV] No console or chat channel set in {}: not connecting", source.display());
         return false;
     }
-    let token = match fs::read_to_string(dir.join(&config.bot_token_file)) {
-        Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
-        _ => {
-            log::error!(target: "horizon_discordsrv", "[DiscordSRV] No bot token in {}: not connecting", config.bot_token_file);
-            return false;
+    // The token never leaves this function: it is not logged, not even its length.
+    let token = if !yaml_token.is_empty() {
+        yaml_token
+    } else {
+        match fs::read_to_string(dir.join(&config.bot_token_file)) {
+            Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
+            _ => {
+                log::error!(target: "horizon_discordsrv", "[DiscordSRV] No bot token in {}: not connecting", source.display());
+                return false;
+            }
         }
     };
     let compiled = console::Formatter::new(&config).and_then(|f| chat::ChatFilters::new(&config.chat).map(|c| (f, c)));
@@ -247,6 +284,7 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
         server: server::ServerInfo::load(&home),
         version: server_version,
         chat_filters,
+        status_index: AtomicUsize::new(0),
         state: Mutex::new(State {
             cache: guild::Cache::default(),
             accounts,
@@ -353,19 +391,18 @@ pub fn fake_left(uuid: u128) -> bool {
     FAKES.lock().unwrap_or_else(|e| e.into_inner()).remove(&uuid)
 }
 
-/// A player joined; `message` is the join line as the game shows it.
-pub fn player_join(uuid: u128, name: &str, message: &str) {
+/// A player joined; `message` is the join line as the game shows it. `silent`: the player has
+/// `discordsrv.silentjoin` (checked by the glue), so nothing is announced.
+pub fn player_join(uuid: u128, name: &str, message: &str, silent: bool) {
     let Some(sh) = shared() else { return };
-    let first = sh.lock_state().new_players.remove(&uuid);
-    let kind = if first { relay::Notice::FirstJoin } else { relay::Notice::Join };
-    sh.notify(kind, uuid, name, "", message);
+    sh.join_notice(uuid, name, message, silent);
 }
 
-/// A player left; `message` is the leave line as the game shows it.
-pub fn player_leave(uuid: u128, name: &str, message: &str) {
+/// A player left; `message` is the leave line as the game shows it. `silent`: the player has
+/// `discordsrv.silentquit`, so nothing is announced.
+pub fn player_leave(uuid: u128, name: &str, message: &str, silent: bool) {
     if let Some(sh) = shared() {
-        sh.lock_state().new_players.remove(&uuid);
-        sh.notify(relay::Notice::Leave, uuid, name, "", message);
+        sh.join_notice_leave(uuid, name, message, silent);
     }
 }
 
@@ -422,6 +459,7 @@ impl Shared {
         Shared {
             rest: rest::Rest::new("http://127.0.0.1:9", "test"),
             chat_filters: chat::ChatFilters::new(&config.chat).unwrap(),
+            status_index: AtomicUsize::new(0),
             config,
             token: "test".into(),
             stop: AtomicBool::new(false),
@@ -455,6 +493,24 @@ impl Shared {
 
     fn push_job(&self, job: relay::Job) {
         self.jobs.lock().unwrap_or_else(|e| e.into_inner()).push_back(job);
+    }
+
+    /// A join: the first join when the player file was missing at login. Silent joins are not announced.
+    fn join_notice(&self, uuid: u128, name: &str, message: &str, silent: bool) {
+        let first = self.lock_state().new_players.remove(&uuid);
+        if silent {
+            return;
+        }
+        let kind = if first { relay::Notice::FirstJoin } else { relay::Notice::Join };
+        self.notify(kind, uuid, name, "", message);
+    }
+
+    /// A leave; silent ones (`discordsrv.silentquit`) are not announced.
+    fn join_notice_leave(&self, uuid: u128, name: &str, message: &str, silent: bool) {
+        self.lock_state().new_players.remove(&uuid);
+        if !silent {
+            self.notify(relay::Notice::Leave, uuid, name, "", message);
+        }
     }
 
     fn notify(&self, kind: relay::Notice, uuid: u128, name: &str, dimension: &str, text: &str) {
@@ -673,6 +729,22 @@ mod tests {
         // Without a preprocessor the message runs as it came.
         sh.console_command_with(message("12", "op me"), None);
         assert_eq!(sh.console_queue.lock().unwrap().drain(..).collect::<Vec<_>>(), vec!["op me".to_string()]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn silent_joins_and_quits_are_not_announced() {
+        let mut c = Config::parse(config::DEFAULT_CONFIG).unwrap();
+        c.chat.channels = vec![("global".into(), "600".into())];
+        let dir = std::env::temp_dir().join(format!("hdsrv-lib-silent-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let sh = Shared::for_test(c, &dir);
+        sh.join_notice(1, "a", "joined", true);
+        sh.join_notice_leave(1, "a", "left", true);
+        assert!(sh.jobs.lock().unwrap().is_empty());
+        sh.join_notice(2, "b", "joined", false);
+        sh.join_notice_leave(2, "b", "left", false);
+        assert_eq!(sh.jobs.lock().unwrap().len(), 2);
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -52,8 +52,14 @@ pub fn close_outcome(code: u16) -> Outcome {
     }
 }
 
-/// The presence of `DiscordGameStatus`'s first entry and `DiscordOnlineStatus`.
-pub fn presence(game_status: &[String], online_status: &str) -> Value {
+/// The entry of `DiscordGameStatus` shown at `index` (the list cycles; blank entries are skipped).
+pub fn status_entry(list: &[String], index: usize) -> Option<&str> {
+    let entries: Vec<&str> = list.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if entries.is_empty() { None } else { Some(entries[index % entries.len()]) }
+}
+
+/// The presence (`d` of op 2 and op 3) for one `DiscordGameStatus` entry and `DiscordOnlineStatus`.
+pub fn presence(game_status: Option<&str>, online_status: &str) -> Value {
     let status = match online_status.to_ascii_uppercase().as_str() {
         "IDLE" => "idle",
         "DND" | "DO_NOT_DISTURB" => "dnd",
@@ -61,10 +67,7 @@ pub fn presence(game_status: &[String], online_status: &str) -> Value {
         _ => "online",
     };
     let activities: Vec<Value> = game_status
-        .first()
-        .filter(|s| !s.trim().is_empty())
         .map(|s| {
-            let s = s.trim();
             let lower = s.to_ascii_lowercase();
             let (kind, name) = [("playing ", 0), ("watching ", 3), ("listening to ", 2), ("competing in ", 5)]
                 .iter()
@@ -187,7 +190,10 @@ fn connection(
             "token": shared.token,
             "intents": INTENTS,
             "properties": { "os": std::env::consts::OS, "browser": "horizon-discordsrv", "device": "horizon-discordsrv" },
-            "presence": presence(&shared.config.discord_game_status, &shared.config.discord_online_status),
+            "presence": presence(
+                status_entry(&shared.config.discord_game_status, shared.status_index.load(Ordering::Relaxed)),
+                &shared.config.discord_online_status
+            ),
         }})
     };
     if send(&mut conn, hello).is_err() {
@@ -199,6 +205,8 @@ fn connection(
         / 1000.0;
     let mut next_beat = Instant::now() + interval.mul_f64(jitter);
     let mut acked = true;
+    let status_every = Duration::from_secs(shared.config.status_update_rate_in_minutes.saturating_mul(60));
+    let mut next_status = Instant::now() + status_every;
     loop {
         if shared.stop.load(Ordering::Relaxed) {
             let _ = conn.socket.close(Some(CloseFrame { code: CloseCode::Normal, reason: "server stopping".into() }));
@@ -216,6 +224,16 @@ fn connection(
             }
             acked = false;
             next_beat = Instant::now() + interval;
+        }
+        // StatusUpdateRateInMinutes: the presence moves on to the next DiscordGameStatus entry.
+        if status_every > Duration::ZERO && Instant::now() >= next_status {
+            let index = shared.status_index.fetch_add(1, Ordering::Relaxed) + 1;
+            let entry = status_entry(&shared.config.discord_game_status, index);
+            let body = json!({ "op": 3, "d": presence(entry, &shared.config.discord_online_status) });
+            if send(&mut conn, body).is_err() {
+                return Outcome::Resume;
+            }
+            next_status = Instant::now() + status_every;
         }
         let text = match conn.socket.read() {
             Ok(Message::Text(t)) => t,
@@ -279,14 +297,25 @@ mod tests {
 
     #[test]
     fn example_status_is_playing_minecraft_online() {
-        let p = presence(&["playing Minecraft".into()], "ONLINE");
+        let p = presence(Some("playing Minecraft"), "ONLINE");
         assert_eq!(p["status"], "online");
         assert_eq!(p["activities"][0]["name"], "Minecraft");
         assert_eq!(p["activities"][0]["type"], 0);
-        let w = presence(&["Watching the void".into()], "dnd");
+        let w = presence(Some("Watching the void"), "dnd");
         assert_eq!(w["activities"][0], json!({ "name": "the void", "type": 3 }));
         assert_eq!(w["status"], "dnd");
-        assert_eq!(presence(&[], "ONLINE")["activities"], json!([]));
+        assert_eq!(presence(None, "ONLINE")["activities"], json!([]));
+    }
+
+    #[test]
+    fn the_status_cycles_through_the_entries_and_skips_blank_ones() {
+        let list: Vec<String> = vec!["playing Minecraft".into(), "  ".into(), "watching the lobby".into()];
+        assert_eq!(status_entry(&list, 0), Some("playing Minecraft"));
+        assert_eq!(status_entry(&list, 1), Some("watching the lobby"));
+        assert_eq!(status_entry(&list, 2), Some("playing Minecraft"));
+        assert_eq!(status_entry(&list, 3), Some("watching the lobby"));
+        assert_eq!(status_entry(&[], 5), None);
+        assert_eq!(presence(status_entry(&list, 1), "ONLINE")["activities"][0]["type"], 3);
     }
 
     #[test]

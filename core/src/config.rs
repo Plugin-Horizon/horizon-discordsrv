@@ -4,12 +4,12 @@
 //! in, and all of them off when missing (a console-only config stays console-only).
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The file written when none exists: the bridge stays off until a console channel is set.
 pub const DEFAULT_CONFIG: &str = include_str!("../config.example.toml");
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct Config {
     /// File holding the bot token (relative to the mod's config folder). Never the token itself.
@@ -35,7 +35,12 @@ pub struct Config {
     pub channel_topic_updater_channel_topics_at_shutdown_enabled: bool,
     pub channel_topic_updater_console_channel_topic_format: String,
     pub channel_topic_updater_console_channel_topic_at_server_shutdown_format: String,
-    /// Discord's REST base; only tests change it.
+    /// Minutes between presence updates; each cycles to the next `discord_game_status` entry (0 = never).
+    pub status_update_rate_in_minutes: u64,
+    /// `DiscordConsoleChannelPadding` (messages.yml); read, not applied (see GAPS.md).
+    pub discord_console_channel_padding: u64,
+    /// Discord's REST base. Set by `ApiBaseUrl` in the TOML file, or by the environment variable
+    /// `HORIZON_DISCORDSRV_API_BASE` (test only, see README).
     pub api_base_url: String,
     /// Chat channels, notifications, linking, watchdog (missing keys: off).
     #[serde(flatten)]
@@ -44,7 +49,7 @@ pub struct Config {
 
 /// The keys of the chat channel side. `Default` is everything off: a missing key never turns a
 /// feature on.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct Chat {
     /// Ordered `[game channel, Discord channel ID]` pairs (`Channels` in config.yml). The first
@@ -161,10 +166,13 @@ pub struct Chat {
     pub minecraft_no_linked_account: String,
     pub no_permission_message: String,
     pub minecraft_nobody_found: String,
+    pub linking_error: String,
+    pub click_to_copy_code: String,
+    pub discord_linked_account_check_failed: String,
 }
 
 /// One `ChannelUpdater` entry: a channel whose name shows server information.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct ChannelUpdater {
     pub channel_id: String,
@@ -176,7 +184,7 @@ pub struct ChannelUpdater {
 
 /// A notification of messages.yml (`MinecraftPlayerJoinMessage` and its siblings). Webhook
 /// delivery is not ported (see the README).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct MessageTemplate {
     pub enabled: bool,
@@ -184,7 +192,7 @@ pub struct MessageTemplate {
     pub embed: EmbedTemplate,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct EmbedTemplate {
     pub enabled: bool,
@@ -201,7 +209,7 @@ pub struct EmbedTemplate {
     pub timestamp: Timestamp,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct Link3 {
     pub image_url: String,
@@ -209,14 +217,14 @@ pub struct Link3 {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct TitleTemplate {
     pub text: String,
     pub url: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct FooterTemplate {
     pub text: String,
@@ -224,7 +232,7 @@ pub struct FooterTemplate {
 }
 
 /// `Timestamp`: `true` for the time of sending, or a fixed epoch second.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum Timestamp {
     Now(bool),
@@ -297,6 +305,8 @@ impl Default for Config {
             channel_topic_updater_channel_topics_at_shutdown_enabled: true,
             channel_topic_updater_console_channel_topic_format: String::new(),
             channel_topic_updater_console_channel_topic_at_server_shutdown_format: String::new(),
+            status_update_rate_in_minutes: 2,
+            discord_console_channel_padding: 0,
             api_base_url: "https://discord.com/api/v10".into(),
             chat: Chat::default(),
         }
