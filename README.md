@@ -1,14 +1,18 @@
 # horizon-discordsrv
 
-> **Unofficial Rust port of DiscordSRV for the Horizon server (https://github.com/horizon-rust/horizon). Not affiliated with or endorsed by the DiscordSRV authors.**
-
-A Horizon native mod (horizon-mixins bundle) that gives a Horizon dedicated server what the
-DiscordSRV plugin does: the **console channel** (the server's log streamed to a Discord channel,
-commands typed there run by the console), the **chat channels** (game chat both ways, join,
-leave, death and advancement notifications, start/stop messages, the player list, topics,
-channel names, the watchdog), **account linking**, and the bot's presence.
+> **Unofficial Rust port of DiscordSRV for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the DiscordSRV authors.**
 
 Not affiliated with DiscordSRV.
+
+> **Built for and working only with [arismoko/horizon](https://github.com/arismoko/horizon)** (the Horizon fork that carries the mod API). [horizon-rust/horizon](https://github.com/horizon-rust/horizon) is experimental for mods and not supported: the earlier version for its native hooks / horizon-mixins is frozen on the `horizon-plain` branch (work stopped on 2026-11-12).
+
+## Which Horizon
+
+This is a native trait mod: `horizon-mod.toml`, a `Cargo.toml` that depends on `horizon-mod-api`, `src/lib.rs` with the hooks, and the plugin logic in the `core/` crate (plain Rust, no engine needed for its tests).
+
+- Pin: `[native] horizon = "54090ee36c4e2c7b43b66db864220c577b94b7e0"` in `horizon-mod.toml` (game `26.3`). That is a development build of arismoko/horizon `main` plus mod API additions that are not all merged upstream yet, so a stock `main` may lack some host methods this mod calls until they land.
+- It compiled and loaded on that build and was smoke-tested there; it has not seen a long run with real players. Treat it as experimental.
+- Feature descriptions below were written for the earlier horizon-rust version; where they name engine calls (`native_*`) or old file paths, read them as descriptions only. The Known gaps list is current.
 
 ## What it does
 
@@ -74,10 +78,10 @@ Not affiliated with DiscordSRV.
   is deleted; blocked roles get a cross, truncated messages a speech bubble and an exclamation mark;
   each attachment (three at most) and sticker is a line of its own.
 
-Not ported (see [STATUS.md](STATUS.md)): webhook delivery, group/nickname/ban synchronisation, "require linked account to play", voice, alerts,
+Not ported (see the Known gaps section): webhook delivery, group/nickname/ban synchronisation, "require linked account to play", voice, alerts,
 rotating statuses, per-channel formats, `/discord reload` and `resync` (they answer only),
 `language` and `debugger`. What Horizon lacks
-for the rest is in [GAPS.md](GAPS.md).
+for the rest is in the Known gaps section.
 
 ## Config
 
@@ -118,17 +122,22 @@ from their messages.
 
 ## Build
 
-The bundle pins Horizon `a589a3dd9` (`[compatibility] horizon_revision`; 0.1.0 was made on
-`69fab597a`):
+Build it as a native trait mod with arismoko's launcher (see the "native mods" how-to in the arismoko/horizon docs):
 
-```
-horizon-mixins apply --workspace <horizon source> --mods <folder with this bundle> --out <stage>
-cd <stage> && cargo build --release -p horizon-client --no-default-features
-cargo test -p discordsrv-bridge          # unit tests of the mod's crate, in the stage
+```sh
+horizon-launcher native-build <path to this folder> --server-output <dir> --version <tag> --trust-native-code
 ```
 
-The crate only uses crates in Horizon's `Cargo.lock` (chrono, log, regex, rustls, serde,
-serde_json, sha1, base64, toml, tungstenite, ureq, webpki-roots).
+`--trust-native-code` is your consent to compile and run this code inside the server. The logic crate tests run without the engine: `(cd core && cargo test)`.
+
+## Known gaps
+
+What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: ...)` in `src/lib.rs`):
+
+- Off by default: set a console channel, chat channels and a token file to switch things on.
+- Death lines fall back to the generic text because the killer and item names are not passed to the hook.
+- Advancement announcements are not sent yet (title and announce flag are not readable).
+- Only a fixed set of message keys has a line; a server in another language gets English there.
 
 ## Licence
 
@@ -140,24 +149,3 @@ source (`plugin.yml`, `commands/*`, `listeners/DiscordChatListener`, `DiscordSRV
 
 Versions up to 0.2.x were written without reading DiscordSRV's source (from its public config files
 and Discord's API documentation); 0.3.0 re-checks everything against the source.
-
-## Tested and untested
-
-0.2.0 (the chat side, linking, the new hooks) is written but not yet built into Horizon: only
-the crate's unit tests ran (formats, filters, mentions, embeds, routing, linking and its file,
-`server.properties`, the gateway dispatch paths). [STATUS.md](STATUS.md) says what to test first.
-
-0.1.0, tested: unit tests (config, filters, prefix, date patterns, packing, command list, presence,
-close codes, websocket accept key, log tailing, 429 parsing), and a Horizon dedicated server
-with the mod against a local fake Discord (gateway + REST on 127.0.0.1): login with presence
-and intents, heartbeats, console lines arriving in batches, a 429 retried, the topic set at start
-and at shutdown, an allowed command run by the console, a forbidden one, a bot's and another
-channel's message ignored, op 7 Reconnect followed by a Resume, and a clean close at stop.
-
-Untested: the real Discord (TLS to `gateway.discord.gg` and `discord.com`, real rate limits,
-real close codes), what DiscordSRV does with forbidden console commands (this port ignores
-them silently), and the exact text DiscordSRV puts in `{name}` and in its code blocks.
-
-## Contributing
-
-Pull requests and improvements are always welcome! Open an issue or a PR -- direct pushes to main are disabled, every change goes through review.
