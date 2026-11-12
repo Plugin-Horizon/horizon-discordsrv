@@ -1,8 +1,8 @@
 id = "discordsrv"
 name = "DiscordSRV"
 version = "0.3.0"
-description = "DiscordSRV for CoreSMP: Discord console channel, chat channels, join/leave/death notices, /discord linking. Off by default (no console channel, no token)."
-authors = ["CoreSMP"]
+description = "DiscordSRV for Horizon: Discord console channel, chat channels, join/leave/death notices, /discord linking. Off by default (no console channel, no token)."
+authors = ["Plugin-Horizon contributors"]
 api = "0.2"
 capabilities = ["registries"]
 
