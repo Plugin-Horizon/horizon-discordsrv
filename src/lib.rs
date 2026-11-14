@@ -287,14 +287,34 @@ impl Hooks for Mod {
                 event.replies.extend(lines.iter().map(|line| legacy(&*host, line)));
                 Flow::Cancel
             }
-            None => Flow::Continue,
+            // The bridge is off (no token, no channel): answer, do not fall through to "unknown command".
+            None => {
+                event.cancelled = true;
+                // Staff sub-commands get DiscordSRV's permission line first, as the bridge gives it when it runs.
+                let mut parts = args.split_whitespace();
+                let sub = parts.next().unwrap_or("").to_ascii_lowercase();
+                // `link <player> <discord>` and `linked <target>` act on other players: staff too.
+                let staff = [
+                    "broadcast", "bcast", "reload", "resync", "unlink", "clearlinked", "language",
+                    "setlanguage", "lang", "setlang", "debugger", "debug",
+                ]
+                .contains(&sub.as_str())
+                    || (sub == "link" && parts.clone().count() >= 1 && args.split_whitespace().count() > 1)
+                    || (sub == "linked" && parts.clone().count() >= 1);
+                if staff && !has("discordsrv.discord", 2) {
+                    event.replies.push(legacy(&*host, "§cYou do not have permission to perform this command."));
+                    return Flow::Cancel;
+                }
+                event.replies.push(Text::literal(
+                    "DiscordSRV is not connected on this server (it is switched off: no bot token, no channel).",
+                ));
+                Flow::Cancel
+            }
         }
     }
 
     fn register_commands(&self, _: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
-        if !bridge::is_running() {
-            return;
-        }
+        // Registered even when the bridge is off, so the commands answer with the line above.
         // One node covers the whole root (`Command::with_node`): every usage names
         // `discordsrv.discord`. Each usage keeps its level as the fallback when no permissions mod
         // answers, so the staff usages stay operator-only as before (DiscordSRV's `discordsrv.*`
