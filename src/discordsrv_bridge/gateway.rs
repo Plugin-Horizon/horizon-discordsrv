@@ -11,8 +11,8 @@ use tungstenite::Message;
 use tungstenite::protocol::CloseFrame;
 use tungstenite::protocol::frame::coding::CloseCode;
 
-use crate::Shared;
-use crate::ws::{self, Connection};
+use crate::discordsrv_bridge::Shared;
+use crate::discordsrv_bridge::ws::{self, Connection};
 
 /// GUILDS, GUILD_MESSAGES, DIRECT_MESSAGES (link codes) and MESSAGE_CONTENT (privileged: turn
 /// it on for the bot). Not the privileged GUILD_MEMBERS: members are learned from messages.

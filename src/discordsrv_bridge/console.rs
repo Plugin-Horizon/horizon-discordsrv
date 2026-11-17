@@ -3,7 +3,7 @@
 use chrono::{DateTime, Local};
 use regex::Regex;
 
-use crate::config::Config;
+use crate::discordsrv_bridge::config::Config;
 
 /// Discord's limit for a message's `content`.
 pub const MAX_MESSAGE: usize = 2000;
@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn example_filters_hide_ips_and_stack_traces() {
-        let c = Config::parse(crate::config::DEFAULT_CONFIG).unwrap();
+        let c = Config::parse(crate::discordsrv_bridge::config::DEFAULT_CONFIG).unwrap();
         let f = Filters::new(&c.discord_console_channel_filters).unwrap();
         assert_eq!(f.apply("Alex[/10.1.2.3:51234] logged in").unwrap(), "Alex[/<ip>] logged in");
         assert_eq!(f.apply("    at net.minecraft.Foo.bar(Foo.java:1)"), None);
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn lines_get_the_example_prefix() {
-        let c = Config::parse(crate::config::DEFAULT_CONFIG).unwrap();
+        let c = Config::parse(crate::discordsrv_bridge::config::DEFAULT_CONFIG).unwrap();
         let f = Formatter::new(&c).unwrap();
         let now = Local.with_ymd_and_hms(2026, 11, 5, 9, 5, 7).unwrap();
         let line = parse_line("[09:05:07] [Server thread/INFO]: §aDone§r (1.2s)!", "INFO");

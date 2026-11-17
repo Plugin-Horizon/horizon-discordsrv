@@ -13,8 +13,8 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::config::Config;
-use crate::yaml::{self, Node};
+use crate::discordsrv_bridge::config::Config;
+use crate::discordsrv_bridge::yaml::{self, Node};
 
 /// The files of the DiscordSRV folder, merged in this order. `config.yml` and `messages.yml` are required.
 pub const FILES: [&str; 6] = ["config.yml", "messages.yml", "linking.yml", "alerts.yml", "synchronization.yml", "voice.yml"];

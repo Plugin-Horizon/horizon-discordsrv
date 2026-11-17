@@ -9,7 +9,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::server::{parse_uuid, uuid_string};
+use crate::discordsrv_bridge::server::{parse_uuid, uuid_string};
 
 pub struct Accounts {
     path: PathBuf,

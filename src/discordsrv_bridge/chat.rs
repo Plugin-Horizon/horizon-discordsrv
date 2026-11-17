@@ -4,10 +4,10 @@
 use regex::Regex;
 use serde_json::{Value, json};
 
-use crate::config::Chat;
-use crate::console::Filters;
-use crate::format::{escape_markdown, fill, nearest_color, strip_codes, to_legacy, translate_ampersand, truncate};
-use crate::guild::{Cache, Role};
+use crate::discordsrv_bridge::config::Chat;
+use crate::discordsrv_bridge::console::Filters;
+use crate::discordsrv_bridge::format::{escape_markdown, fill, nearest_color, strip_codes, to_legacy, translate_ampersand, truncate};
+use crate::discordsrv_bridge::guild::{Cache, Role};
 
 /// What happens with a message from a chat channel.
 #[derive(Debug, PartialEq, Eq)]
@@ -351,7 +351,7 @@ pub fn minecraft_to_discord(chat: &Chat, filters: &ChatFilters, cache: &Cache, m
     );
     let text = strip_codes(&pattern).replace("%message%", &message);
     let text = filters.game.apply(&text)?;
-    Some(truncate(&text, crate::console::MAX_MESSAGE))
+    Some(truncate(&text, crate::discordsrv_bridge::console::MAX_MESSAGE))
 }
 
 /// `@name` in a game message as a Discord mention of the role or member with that name (case
@@ -414,8 +414,8 @@ pub fn allowed_mentions(chat: &Chat) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, DEFAULT_CONFIG};
-    use crate::guild::tests::sample;
+    use crate::discordsrv_bridge::config::{Config, DEFAULT_CONFIG};
+    use crate::discordsrv_bridge::guild::tests::sample;
 
     fn chat() -> Chat {
         let mut c = Config::parse(DEFAULT_CONFIG).unwrap().chat;

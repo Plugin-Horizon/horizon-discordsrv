@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// The file written when none exists: the bridge stays off until a console channel is set.
-pub const DEFAULT_CONFIG: &str = include_str!("../config.example.toml");
+pub const DEFAULT_CONFIG: &str = include_str!("../../data/discordsrv/config.example.toml");
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]

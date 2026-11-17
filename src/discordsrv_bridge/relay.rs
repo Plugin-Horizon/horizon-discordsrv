@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 use chrono::{Local, Utc};
 use serde_json::{Value, json};
 
-use crate::chat::{self, FromDiscord, GameChat};
-use crate::console::java_date_format;
-use crate::format::{escape_markdown, fill, strip_codes, translate_ampersand, truncate};
-use crate::linking::CodeResult;
-use crate::server::{Player, uuid_string};
-use crate::{Shared, State, embed};
+use crate::discordsrv_bridge::chat::{self, FromDiscord, GameChat};
+use crate::discordsrv_bridge::console::java_date_format;
+use crate::discordsrv_bridge::format::{escape_markdown, fill, strip_codes, translate_ampersand, truncate};
+use crate::discordsrv_bridge::linking::CodeResult;
+use crate::discordsrv_bridge::server::{Player, uuid_string};
+use crate::discordsrv_bridge::{Shared, State, embed};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Notice {
@@ -74,7 +74,7 @@ impl Shared {
         let console = self.config.discord_console_channel_id.trim();
         if !console.is_empty() && channel == console {
             drop(st);
-            if let Some(m) = crate::gateway::console_message(d, console) {
+            if let Some(m) = crate::discordsrv_bridge::gateway::console_message(d, console) {
                 self.console_command(m);
             }
             return;
@@ -116,7 +116,7 @@ impl Shared {
         if let Some((_, answer)) = canned {
             let text = strip_codes(&self.server_text(answer, &st.players));
             if !text.trim().is_empty() {
-                let body = json!({ "content": truncate(&text, crate::console::MAX_MESSAGE), "allowed_mentions": chat::allowed_mentions(c) });
+                let body = json!({ "content": truncate(&text, crate::discordsrv_bridge::console::MAX_MESSAGE), "allowed_mentions": chat::allowed_mentions(c) });
                 self.push_job(Job::Post { channel: channel.to_string(), body, expire: None });
             }
             return;
@@ -253,7 +253,7 @@ impl Shared {
     /// messages as fit, deleted after `DiscordChatChannelConsoleCommandExpiration` seconds.
     pub(crate) fn chat_console_answer(&self, channel: &str, output: &[String]) {
         let c = &self.config.chat;
-        let lines: Vec<String> = output.iter().flat_map(|l| l.split('\n')).map(crate::console::strip_colors).collect();
+        let lines: Vec<String> = output.iter().flat_map(|l| l.split('\n')).map(crate::discordsrv_bridge::console::strip_colors).collect();
         let expire = (c.discord_chat_channel_console_command_expiration > 0)
             .then(|| (Duration::from_secs(c.discord_chat_channel_console_command_expiration), None));
         let mut body = String::new();
@@ -296,12 +296,12 @@ impl Shared {
             Ok(CodeResult::Invalid) => fill(&c.invalid_code, &[("code", &digits), ("mention", &mention)]),
             Ok(CodeResult::Unknown) => fill(&c.unknown_code, &[("code", &digits), ("mention", &mention)]),
             Ok(CodeResult::AlreadyLinked(uuid)) => {
-                let name = crate::commands::known_name(st, &self.server, uuid).unwrap_or_else(|| "<Unknown>".to_string());
+                let name = crate::discordsrv_bridge::commands::known_name(st, &self.server, uuid).unwrap_or_else(|| "<Unknown>".to_string());
                 fill(&c.discord_account_already_linked, &[("uuid", &uuid_string(uuid)), ("username", &name), ("mention", &mention)])
             }
             Ok(CodeResult::Linked { uuid, name, replaced }) => {
                 if let Some(old) = replaced {
-                    let old_name = crate::commands::known_name(st, &self.server, old).unwrap_or_else(|| uuid_string(old));
+                    let old_name = crate::discordsrv_bridge::commands::known_name(st, &self.server, old).unwrap_or_else(|| uuid_string(old));
                     self.push_job(Job::Unlinked { discord: author.clone(), uuid: old, name: old_name });
                 }
                 let line = fill(&c.minecraft_account_linked, &[("username", &username), ("id", &author)]);
@@ -382,7 +382,7 @@ impl Shared {
                 ("timestamp", &Utc::now().timestamp().to_string()),
             ],
         );
-        crate::topic_text(&filled, tps, &self.version)
+        crate::discordsrv_bridge::topic_text(&filled, tps, &self.version)
     }
 
     fn post_logged(&self, channel: &str, body: &Value, what: &str) -> Option<String> {
@@ -670,7 +670,7 @@ fn watchdog(shared: &Shared, timeout: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, DEFAULT_CONFIG};
+    use crate::discordsrv_bridge::config::{Config, DEFAULT_CONFIG};
 
     fn bridge(name: &str) -> (Shared, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("hdsrv-relay-{name}-{}", std::process::id()));
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(lines, vec!["§bJoin us on Discord at https://discord.gg/changethisintheconfig.yml§b. For command help, do \"/discord ?\"".to_string()]);
         assert_eq!(sorted_lines(&sh, 1, "bogus", &player), vec!["§bThat command doesn't exist!".to_string()]);
         // Help lists what the player may run, and `help <command>` one entry (colours are random).
-        let strip = |v: Vec<String>| v.iter().map(|l| crate::format::strip_codes(l)).collect::<Vec<_>>();
+        let strip = |v: Vec<String>| v.iter().map(|l| crate::discordsrv_bridge::format::strip_codes(l)).collect::<Vec<_>>();
         let help = strip(sorted_lines(&sh, 1, "?", &player));
         assert_eq!(help[0], "================[ DiscordSRV ]================");
         assert!(help.contains(&"- /discord ?/help".to_string()));

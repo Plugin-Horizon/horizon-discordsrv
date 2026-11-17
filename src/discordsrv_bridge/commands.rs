@@ -4,11 +4,11 @@
 //! Every reply is a list of `&`-coded lines; the glue turns them into chat lines.
 use serde_json::json;
 
-use crate::chat;
-use crate::format::{fill, translate_ampersand, truncate};
-use crate::relay::Job;
-use crate::server::{ServerInfo, parse_uuid, uuid_string};
-use crate::{Shared, State};
+use crate::discordsrv_bridge::chat;
+use crate::discordsrv_bridge::format::{fill, translate_ampersand, truncate};
+use crate::discordsrv_bridge::relay::Job;
+use crate::discordsrv_bridge::server::{ServerInfo, parse_uuid, uuid_string};
+use crate::discordsrv_bridge::{Shared, State};
 
 /// The operator level of the `discordsrv.*` nodes that default to `op`.
 pub const OP_LEVEL: u8 = 2;
@@ -468,7 +468,7 @@ impl Shared {
         if let Some(channel) = target
             && !text.trim().is_empty()
         {
-            let content = truncate(&text, crate::console::MAX_MESSAGE);
+            let content = truncate(&text, crate::discordsrv_bridge::console::MAX_MESSAGE);
             self.push_job(Job::Post { channel, body: json!({ "content": content, "allowed_mentions": chat::allowed_mentions(c) }), expire: None });
         }
         Vec::new()

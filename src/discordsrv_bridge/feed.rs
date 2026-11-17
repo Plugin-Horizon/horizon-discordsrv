@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::console::LogLine;
+use crate::discordsrv_bridge::console::LogLine;
 
 pub struct Feed {
     lines: Mutex<VecDeque<LogLine>>,

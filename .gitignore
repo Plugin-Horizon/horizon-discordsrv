@@ -3,3 +3,4 @@ token.txt
 Cargo.lock
 /target
 /core/target
+.horizon/

@@ -23,17 +23,21 @@
 //!   message as it came, or another one), `Refuse` runs nothing and posts `reply` to the channel.
 //!
 //! Until a preprocessor is set, a console channel message runs as it came.
+
+pub mod discordsrv_bridge;
 use discordsrv_bridge as bridge;
 use mod_api::{
     Command, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
+    NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode, PermissionValueType,
     PlayerAdvancementDoneEvent, PlayerCommandEvent, PlayerDiedEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, PlayerLoginEvent, RegisterCommandsEvent, RegisterConfigsEvent,
     ServerAboutToStartEvent, ServerChatEvent, ServerHost, ServerStoppingEvent, ServerTickEvent,
     ServerTickPhase, Text,
 };
+use std::collections::BTreeMap;
 use std::path::Path;
 
-pub use discordsrv_bridge::{Preprocess, Preprocessor, set_console_preprocessor};
+pub use crate::discordsrv_bridge::{Preprocess, Preprocessor, set_console_preprocessor};
 
 const ID: &str = "discordsrv";
 /// Relative to the server's `config/` folder.
@@ -73,18 +77,37 @@ fn death_line(cause: Option<&str>, name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Whether `uuid` holds DiscordSRV's permission `node`, whose default is `default_level` (0:
-/// everyone, 2: operators). A permissions mod's answer decides when it sets one; a player who is
-/// not on the server holds only the nodes that default to everyone.
-fn has_node(host: &dyn ServerHost, uuid: u128, node: &str, default_level: u8) -> bool {
+/// Every permission node the bridge asks, with the operator level it defaults to (0: everyone, 2:
+/// operators). Declared in `permission_gather_nodes`; a node not listed here is answered as denied.
+const NODES: [(&str, u8); 14] = [
+    ("discordsrv.bcast", 2),
+    ("discordsrv.debug", 2),
+    ("discordsrv.help", 0),
+    ("discordsrv.language", 2),
+    ("discordsrv.link", 0),
+    ("discordsrv.linked", 0),
+    ("discordsrv.reload", 2),
+    ("discordsrv.resync", 2),
+    ("discordsrv.unlink", 2),
+    ("discordsrv.link.others", 2),
+    ("discordsrv.linked.others", 2),
+    ("discordsrv.silentjoin", 2),
+    ("discordsrv.silentquit", 2),
+    ("discordsrv.discord", 2),
+];
+
+/// A Boolean permission node named `name`.
+fn node(name: &str) -> PermissionNode {
+    PermissionNode::new(name, PermissionValueType::Boolean)
+}
+
+/// Whether `uuid` holds DiscordSRV's permission `node`. A player who is not on the server holds
+/// only the nodes that default to everyone (`default_level` 0). Any handler error is a denial.
+fn has_node(host: &mut dyn ServerHost, uuid: u128, node_name: &str, default_level: u8) -> bool {
     let Some(player) = host.player(uuid) else {
         return default_level == 0;
     };
-    if default_level == 0 {
-        player.permission_value(host, node) != Some(false)
-    } else {
-        player.has_permission(host, node)
-    }
+    player.permission_bool(host, &node(node_name)).unwrap_or(false)
 }
 
 fn is_fake(host: &dyn ServerHost, uuid: u128) -> bool {
@@ -176,8 +199,8 @@ impl Hooks for Mod {
         }
         for command in work.console {
             // The console channel gets the command's own answer lines, as the console prints them.
-            let (ran, output) = host.server_run_command_captured(&command);
-            bridge::console_output(&command, ran, output);
+            let result = host.commands().run_command_with_output(&command);
+            bridge::console_output(&command, result.success, result.feedback);
         }
         for line in work.broadcasts {
             let text = legacy(&*host, &line);
@@ -210,7 +233,7 @@ impl Hooks for Mod {
         }
         let message = vanilla_line("multiplayer.player.joined", &event.name).unwrap_or_default();
         // discordsrv.silentjoin, default operator in DiscordSRV's plugin.yml.
-        let silent = has_node(&*host, event.player, "discordsrv.silentjoin", 2);
+        let silent = has_node(&mut *host, event.player, "discordsrv.silentjoin", 2);
         bridge::player_join(event.player, &event.name, &message, silent);
     }
 
@@ -221,7 +244,7 @@ impl Hooks for Mod {
         let message = vanilla_line("multiplayer.player.left", &event.name).unwrap_or_default();
         // discordsrv.silentquit, default operator. The player is already gone from the list here,
         // so the node reads as unheld unless the server is stopping (see PORT_NOTES.md).
-        let silent = has_node(&*host, event.player, "discordsrv.silentquit", 2);
+        let silent = has_node(&mut *host, event.player, "discordsrv.silentquit", 2);
         bridge::player_leave(event.player, &event.name, &message, silent);
     }
 
@@ -279,7 +302,12 @@ impl Hooks for Mod {
             return Flow::Continue;
         }
         let player = event.player;
-        let has = |node: &str, default_level: u8| has_node(&*host, player, node, default_level);
+        // The answers are read once here: the bridge's `has` is a plain `Fn`, and a query needs `&mut` host.
+        let granted: BTreeMap<&str, bool> = NODES
+            .iter()
+            .map(|&(name, level)| (name, has_node(&mut *host, player, name, level)))
+            .collect();
+        let has = |name: &str, _default_level: u8| granted.get(name).copied().unwrap_or(false);
         let args = words.next().unwrap_or("");
         match bridge::discord_command(event.player, &event.name, args, &has) {
             Some(lines) => {
@@ -310,6 +338,12 @@ impl Hooks for Mod {
                 ));
                 Flow::Cancel
             }
+        }
+    }
+
+    fn permission_gather_nodes(&self, event: &mut PermissionGatherNodesEvent<'_>) {
+        for (name, level) in NODES {
+            let _ = event.nodes.add(node(name), NodeDefault::Level(PermissionLevel::from_level(i32::from(level))));
         }
     }
 
@@ -346,7 +380,7 @@ impl Hooks for Mod {
         for root in ["discord", "discordsrv"] {
             for (args, level) in USAGES {
                 event.commands.push(
-                    Command::op(&format!("{root}{args}"), level).with_node("discordsrv.discord"),
+                    Command::op(&format!("{root}{args}"), level).with_node(&node("discordsrv.discord")),
                 );
             }
         }
