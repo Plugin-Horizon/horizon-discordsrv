@@ -13,6 +13,10 @@ use crate::discordsrv_bridge::{Shared, State};
 /// The operator level of the `discordsrv.*` nodes that default to `op`.
 pub const OP_LEVEL: u8 = 2;
 
+/// The sender id of the console (and RCON, command blocks): no player has it. DiscordSRV's
+/// commands take a `CommandSender`, so they work from there too.
+pub const CONSOLE: u128 = 0;
+
 const LINKING_ERROR: &str = "&cCurrently unable to link accounts due to an internal error. Contact your server administration team.";
 
 /// One `@Command` of DiscordSRV.
@@ -98,6 +102,12 @@ const HELP_COLOURS: [char; 11] = ['2', '3', '4', '5', '6', '9', 'a', 'b', 'c', '
 
 fn find(word: &str) -> Option<&'static Command> {
     COMMANDS.iter().find(|c| c.names.iter().any(|n| *n == word))
+}
+
+/// The permission node and default operator level (0 or `OP_LEVEL`) of the sub-command `word`
+/// (any of its names, any case), None for a word that is no sub-command.
+pub(crate) fn permission_of(word: &str) -> Option<(&'static str, u8)> {
+    find(&word.to_ascii_lowercase()).map(|c| (c.permission, if c.op { OP_LEVEL } else { 0 }))
 }
 
 fn random_below(n: usize) -> usize {
@@ -272,6 +282,9 @@ impl Shared {
             self.push_job(Job::Linked { discord_name: tag.clone(), discord, uuid: target, name: player.clone() });
             return vec![format!("&aLinked together &6{player}&a and &6{tag}")];
         }
+        if uuid == CONSOLE {
+            return vec!["&cOnly players can execute this command.".to_string()];
+        }
         // The player's earlier codes stop working, so no one can collect several rewards.
         st.accounts.drop_codes(uuid);
         if st.accounts.discord_of(uuid).is_some() {
@@ -286,6 +299,9 @@ impl Shared {
     fn cmd_linked(&self, uuid: u128, args: &[&str], has: &dyn Fn(&str, u8) -> bool) -> Vec<String> {
         let c = &self.config.chat;
         let st = self.lock_state();
+        if args.is_empty() && uuid == CONSOLE {
+            return vec![fill(&c.minecraft_nobody_found, &[("target", "CONSOLE")])];
+        }
         if args.is_empty() {
             return vec![match st.accounts.discord_of(uuid) {
                 Some(id) => {
@@ -348,6 +364,9 @@ impl Shared {
     fn cmd_unlink(&self, uuid: u128, name: &str, args: &[&str], has: &dyn Fn(&str, u8) -> bool) -> Vec<String> {
         let c = &self.config.chat;
         let mut st = self.lock_state();
+        if args.is_empty() && uuid == CONSOLE {
+            return vec!["&cNo player specified. It can be a player UUID, player name, or Discord ID.".to_string()];
+        }
         if args.is_empty() {
             let Some(id) = st.accounts.discord_of(uuid).map(str::to_string) else {
                 return vec![c.minecraft_no_linked_account.clone()];

@@ -868,6 +868,24 @@ mod tests {
     }
 
     #[test]
+    fn the_console_cannot_use_the_own_account_forms() {
+        let (sh, dir) = bridge("j");
+        let c = crate::discordsrv_bridge::commands::CONSOLE;
+        assert_eq!(sorted_lines(&sh, c, "link", &op), vec!["§cOnly players can execute this command.".to_string()]);
+        assert_eq!(
+            sorted_lines(&sh, c, "unlink", &op),
+            vec!["§cNo player specified. It can be a player UUID, player name, or Discord ID.".to_string()]
+        );
+        assert_eq!(
+            crate::discordsrv_bridge::commands::permission_of("CLEARLINKED"),
+            Some(("discordsrv.unlink", 2))
+        );
+        assert_eq!(crate::discordsrv_bridge::commands::permission_of("?"), Some(("discordsrv.help", 0)));
+        assert_eq!(crate::discordsrv_bridge::commands::permission_of("nothing"), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn an_operator_links_broadcasts_and_unlinks_others() {
         let (sh, dir) = bridge("i");
         sh.lock_state().players = vec![Player { uuid: 0xAB, name: "Alex".into(), dimension: String::new() }];

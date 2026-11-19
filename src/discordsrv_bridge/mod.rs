@@ -446,6 +446,15 @@ pub fn known_player(uuid: u128) -> Option<Player> {
     shared().and_then(|sh| sh.lock_state().players.iter().find(|p| p.uuid == uuid).cloned())
 }
 
+/// The permission node and default operator level of a `/discord` sub-command word, None when it
+/// is no sub-command.
+pub fn command_permission(word: &str) -> Option<(&'static str, u8)> {
+    commands::permission_of(word)
+}
+
+/// Id of the console as `/discord` sender (see `discord_command`).
+pub const CONSOLE: u128 = commands::CONSOLE;
+
 /// `/discord [link|linked|unlink]` typed by a player (`args` without the `discord`): the
 /// `§`-coded answer lines, or None when the bridge isn't running (the command is not ours then).
 pub fn discord_command(uuid: u128, name: &str, args: &str, has: &dyn Fn(&str, u8) -> bool) -> Option<Vec<String>> {

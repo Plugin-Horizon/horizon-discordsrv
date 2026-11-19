@@ -27,14 +27,15 @@
 pub mod discordsrv_bridge;
 use discordsrv_bridge as bridge;
 use mod_api::{
-    Command, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
+    Command, CommandArgumentValue, CommandSource, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
     NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode, PermissionValueType,
     PlayerAdvancementDoneEvent, PlayerCommandEvent, PlayerDiedEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, PlayerLoginEvent, RegisterCommandsEvent, RegisterConfigsEvent,
-    ServerAboutToStartEvent, ServerChatEvent, ServerHost, ServerStoppingEvent, ServerTickEvent,
+    RunModCommandEvent, ServerAboutToStartEvent, ServerChatEvent, ServerHost, ServerStoppingEvent, ServerTickEvent,
     ServerTickPhase, Text,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Mutex;
 use std::path::Path;
 
 pub use crate::discordsrv_bridge::{Preprocess, Preprocessor, set_console_preprocessor};
@@ -45,7 +46,11 @@ const CONFIG_FILE: &str = "discordsrv/config.toml";
 const GAME_VERSION: &str = "26.3";
 
 #[derive(Default)]
-struct Mod;
+struct Mod {
+    /// Players who held `discordsrv.silentquit` when they joined: the node is asked at login,
+    /// because the player is already gone from the server when the quit hook runs.
+    silent_quit: Mutex<BTreeSet<u128>>,
+}
 
 /// A bridge line as a chat line: its `§` colour codes read as styles (`text_from_legacy`). The
 /// stripped text is kept only for a line the engine refuses.
@@ -78,8 +83,10 @@ fn death_line(cause: Option<&str>, name: &str) -> String {
 }
 
 /// Every permission node the bridge asks, with the operator level it defaults to (0: everyone, 2:
-/// operators). Declared in `permission_gather_nodes`; a node not listed here is answered as denied.
-const NODES: [(&str, u8); 14] = [
+/// operators, 5: nobody; the typed default has no "nobody" level, so 5 is the highest one, the
+/// owner level). Declared in `permission_gather_nodes`; a node not listed here is answered as denied.
+/// DiscordSRV's `plugin.yml` has the same defaults (`default: true`, `op`, `false`).
+const NODES: [(&str, u8); 19] = [
     ("discordsrv.bcast", 2),
     ("discordsrv.debug", 2),
     ("discordsrv.help", 0),
@@ -91,9 +98,14 @@ const NODES: [(&str, u8); 14] = [
     ("discordsrv.unlink", 2),
     ("discordsrv.link.others", 2),
     ("discordsrv.linked.others", 2),
-    ("discordsrv.silentjoin", 2),
-    ("discordsrv.silentquit", 2),
-    ("discordsrv.discord", 2),
+    ("discordsrv.silentjoin", 5),
+    ("discordsrv.silentquit", 5),
+    ("discordsrv.discord", 0),
+    ("discordsrv.chat", 0),
+    ("discordsrv.unlink.others", 2),
+    ("discordsrv.nicknamesync", 0),
+    ("discordsrv.updatenotification", 2),
+    ("discordsrv.groupsyncwithcommands", 2),
 ];
 
 /// A Boolean permission node named `name`.
@@ -108,6 +120,10 @@ fn has_node(host: &mut dyn ServerHost, uuid: u128, node_name: &str, default_leve
         return default_level == 0;
     };
     player.permission_bool(host, &node(node_name)).unwrap_or(false)
+}
+
+fn lock_set(set: &Mutex<BTreeSet<u128>>) -> std::sync::MutexGuard<'_, BTreeSet<u128>> {
+    set.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn is_fake(host: &dyn ServerHost, uuid: u128) -> bool {
@@ -144,6 +160,44 @@ fn advancement_title(advancement: &str) -> Option<String> {
     None
 }
 
+/// The answer to `/discord <args>`. `sender` is the player (uuid, name); None is the console (or a
+/// command block), which holds every node.
+fn discord_answer(host: &mut dyn ServerHost, sender: Option<(u128, &str)>, args: &str) -> Vec<Text> {
+    let (uuid, name) = sender.unwrap_or((bridge::CONSOLE, "CONSOLE"));
+    // The answers are read once here: the bridge's `has` is a plain `Fn`, and a query needs `&mut` host.
+    let granted: BTreeMap<&str, bool> = NODES
+        .iter()
+        .map(|&(node_name, level)| (node_name, sender.is_none() || has_node(&mut *host, uuid, node_name, level)))
+        .collect();
+    let has = |node_name: &str, _default_level: u8| granted.get(node_name).copied().unwrap_or(false);
+    match bridge::discord_command(uuid, name, args, &has) {
+        Some(lines) => lines.iter().map(|line| legacy(&*host, line)).collect(),
+        // The bridge is off (no token, no channel): answer, do not fall through to "unknown command".
+        None => {
+            // A sub-command the sender may not run gets DiscordSRV's permission line first, as the
+            // bridge gives it when it runs.
+            let mut parts = args.split_whitespace();
+            let sub = parts.next().unwrap_or("").to_ascii_lowercase();
+            let given = parts.count();
+            let mut needed: Vec<&str> = Vec::new();
+            if let Some((node_name, _)) = bridge::command_permission(&sub) {
+                needed.push(node_name);
+            }
+            match sub.as_str() {
+                "link" if given >= 2 => needed.push("discordsrv.link.others"),
+                "linked" | "unlink" | "clearlinked" if given >= 1 => needed.push("discordsrv.linked.others"),
+                _ => {}
+            }
+            if needed.iter().any(|node_name| !has(node_name, 0)) {
+                return vec![legacy(&*host, "§cYou do not have permission to perform this command.")];
+            }
+            vec![Text::literal(
+                "DiscordSRV is not connected on this server (it is switched off: no bot token, no channel).",
+            )]
+        }
+    }
+}
+
 #[mod_api::horizon_mod]
 impl Hooks for Mod {
     fn register_configs(&self, _: HostSide, event: &mut RegisterConfigsEvent<'_>) {
@@ -168,10 +222,12 @@ impl Hooks for Mod {
         // The players still on get their leave notices first, as on Paper; then the bridge sends
         // the shutdown message and topics and disconnects.
         if bridge::chat_running() {
-            for player in host.players().server_players() {
+            let players = host.players().server_players();
+            for player in players {
                 let name = player.name(&*host).unwrap_or_default();
                 let line = vanilla_line("multiplayer.player.left", &name).unwrap_or_default();
-                bridge::player_leave(player.uuid(), &name, &line, false);
+                let silent = has_node(&mut *host, player.uuid(), "discordsrv.silentquit", 5);
+                bridge::player_leave(player.uuid(), &name, &line, silent);
             }
         }
         bridge::stop();
@@ -232,8 +288,11 @@ impl Hooks for Mod {
             return;
         }
         let message = vanilla_line("multiplayer.player.joined", &event.name).unwrap_or_default();
-        // discordsrv.silentjoin, default operator in DiscordSRV's plugin.yml.
-        let silent = has_node(&mut *host, event.player, "discordsrv.silentjoin", 2);
+        // discordsrv.silentjoin, default nobody in DiscordSRV's plugin.yml.
+        let silent = has_node(&mut *host, event.player, "discordsrv.silentjoin", 5);
+        if has_node(&mut *host, event.player, "discordsrv.silentquit", 5) {
+            lock_set(&self.silent_quit).insert(event.player);
+        }
         bridge::player_join(event.player, &event.name, &message, silent);
     }
 
@@ -242,9 +301,8 @@ impl Hooks for Mod {
             return;
         }
         let message = vanilla_line("multiplayer.player.left", &event.name).unwrap_or_default();
-        // discordsrv.silentquit, default operator. The player is already gone from the list here,
-        // so the node reads as unheld unless the server is stopping (see PORT_NOTES.md).
-        let silent = has_node(&mut *host, event.player, "discordsrv.silentquit", 2);
+        // discordsrv.silentquit, default nobody: the answer from login (the player is already gone here).
+        let silent = lock_set(&self.silent_quit).remove(&event.player);
         bridge::player_leave(event.player, &event.name, &message, silent);
     }
 
@@ -281,9 +339,10 @@ impl Hooks for Mod {
         bridge::player_advancement(event.player, &event.name, &dimension, &title);
     }
 
-    fn server_chat(&self, _: &mut dyn ServerHost, event: &mut ServerChatEvent<'_>) -> Flow {
-        // A cancelled message (by a mod before this one) is not told to listeners at all.
-        if !event.cancelled {
+    fn server_chat(&self, host: &mut dyn ServerHost, event: &mut ServerChatEvent<'_>) -> Flow {
+        // A cancelled message (by a mod before this one) is not told to listeners at all; a
+        // player without `discordsrv.chat` (default everyone) is not relayed to Discord.
+        if !event.cancelled && has_node(&mut *host, event.player, "discordsrv.chat", 0) {
             bridge::player_chat(event.player, &event.username, &event.raw_text);
         }
         Flow::Continue
@@ -301,44 +360,39 @@ impl Hooks for Mod {
         if !is_discord {
             return Flow::Continue;
         }
-        let player = event.player;
-        // The answers are read once here: the bridge's `has` is a plain `Fn`, and a query needs `&mut` host.
-        let granted: BTreeMap<&str, bool> = NODES
-            .iter()
-            .map(|&(name, level)| (name, has_node(&mut *host, player, name, level)))
-            .collect();
-        let has = |name: &str, _default_level: u8| granted.get(name).copied().unwrap_or(false);
         let args = words.next().unwrap_or("");
-        match bridge::discord_command(event.player, &event.name, args, &has) {
-            Some(lines) => {
-                event.cancelled = true;
-                event.replies.extend(lines.iter().map(|line| legacy(&*host, line)));
-                Flow::Cancel
-            }
-            // The bridge is off (no token, no channel): answer, do not fall through to "unknown command".
-            None => {
-                event.cancelled = true;
-                // Staff sub-commands get DiscordSRV's permission line first, as the bridge gives it when it runs.
-                let mut parts = args.split_whitespace();
-                let sub = parts.next().unwrap_or("").to_ascii_lowercase();
-                // `link <player> <discord>` and `linked <target>` act on other players: staff too.
-                let staff = [
-                    "broadcast", "bcast", "reload", "resync", "unlink", "clearlinked", "language",
-                    "setlanguage", "lang", "setlang", "debugger", "debug",
-                ]
-                .contains(&sub.as_str())
-                    || (sub == "link" && parts.clone().count() >= 1 && args.split_whitespace().count() > 1)
-                    || (sub == "linked" && parts.clone().count() >= 1);
-                if staff && !has("discordsrv.discord", 2) {
-                    event.replies.push(legacy(&*host, "§cYou do not have permission to perform this command."));
-                    return Flow::Cancel;
-                }
-                event.replies.push(Text::literal(
-                    "DiscordSRV is not connected on this server (it is switched off: no bot token, no channel).",
-                ));
-                Flow::Cancel
+        let lines = discord_answer(host, Some((event.player, &*event.name)), args);
+        event.cancelled = true;
+        event.replies.extend(lines);
+        Flow::Cancel
+    }
+
+    /// `/discord ...` from the console, RCON or a command block (DiscordSRV's commands take any
+    /// `CommandSender`), and from a player through `execute`. A player's typed line is answered
+    /// in `player_command`.
+    fn run_mod_command(&self, host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>) -> Flow {
+        let root = event.command.literals.first().map(String::as_str);
+        if !matches!(root, Some("discord" | "discordsrv")) {
+            return Flow::Continue;
+        }
+        // The words after the root: the literals, then the arguments (every usage has them in that order).
+        let mut words: Vec<String> = event.command.literals[1..].to_vec();
+        for argument in &event.command.arguments {
+            if let CommandArgumentValue::String(text) = &argument.value {
+                words.push(text.clone());
             }
         }
+        let sender = match &event.source {
+            CommandSource::Player { player, .. } => {
+                Some((player.uuid(), player.name(&*host).unwrap_or_default()))
+            }
+            _ => None,
+        };
+        let lines = discord_answer(host, sender.as_ref().map(|(u, n)| (*u, n.as_str())), &words.join(" "));
+        for line in lines {
+            let _ = host.commands().feedback(line);
+        }
+        Flow::Cancel
     }
 
     fn permission_gather_nodes(&self, event: &mut PermissionGatherNodesEvent<'_>) {
@@ -349,39 +403,35 @@ impl Hooks for Mod {
 
     fn register_commands(&self, _: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
         // Registered even when the bridge is off, so the commands answer with the line above.
-        // One node covers the whole root (`Command::with_node`): every usage names
-        // `discordsrv.discord`. Each usage keeps its level as the fallback when no permissions mod
-        // answers, so the staff usages stay operator-only as before (DiscordSRV's `discordsrv.*`
-        // nodes default to op). The per-usage DiscordSRV nodes (`discordsrv.link.others`, ...) are
-        // checked inside the bridge's command handling.
+        // Each usage names its own DiscordSRV node, as in the original's `plugin.yml` (the root
+        // `discordsrv.discord` is everyone's). A usage keeps its level as the fallback when no
+        // permissions mod answers. The `<x>.others` forms are checked again inside the bridge.
         // NOTE: `link <player>` takes a word, not a player argument, so an offline player can be
         // linked as DiscordSRV allows.
-        const USAGES: [(&str, u8); 19] = [
-            ("", 0),
-            (" help [command:word]", 0),
-            (" link", 0),
-            (" link <player:word> <discord:text>", 2),
-            (" linked", 0),
-            (" linked <target:text>", 2),
-            (" unlink", 2),
-            (" unlink <target:text>", 2),
-            (" clearlinked", 2),
-            (" clearlinked <target:text>", 2),
-            (" broadcast <message:text>", 2),
-            (" bcast <message:text>", 2),
-            (" resync", 2),
-            (" reload", 2),
-            (" language [language:word]", 2),
-            (" setlanguage [language:word]", 2),
-            (" lang [language:word]", 2),
-            (" setlang [language:word]", 2),
-            (" debugger [action:word] [categories:text]", 2),
+        const USAGES: [(&str, u8, &str); 19] = [
+            ("", 0, "discordsrv.discord"),
+            (" help [command:word]", 0, "discordsrv.help"),
+            (" link", 0, "discordsrv.link"),
+            (" link <player:word> <discord:text>", 2, "discordsrv.link.others"),
+            (" linked", 0, "discordsrv.linked"),
+            (" linked <target:text>", 2, "discordsrv.linked.others"),
+            (" unlink", 2, "discordsrv.unlink"),
+            (" unlink <target:text>", 2, "discordsrv.unlink"),
+            (" clearlinked", 2, "discordsrv.unlink"),
+            (" clearlinked <target:text>", 2, "discordsrv.unlink"),
+            (" broadcast <message:text>", 2, "discordsrv.bcast"),
+            (" bcast <message:text>", 2, "discordsrv.bcast"),
+            (" resync", 2, "discordsrv.resync"),
+            (" reload", 2, "discordsrv.reload"),
+            (" language [language:word]", 2, "discordsrv.language"),
+            (" setlanguage [language:word]", 2, "discordsrv.language"),
+            (" lang [language:word]", 2, "discordsrv.language"),
+            (" setlang [language:word]", 2, "discordsrv.language"),
+            (" debugger [action:word] [categories:text]", 2, "discordsrv.debug"),
         ];
         for root in ["discord", "discordsrv"] {
-            for (args, level) in USAGES {
-                event.commands.push(
-                    Command::op(&format!("{root}{args}"), level).with_node(&node("discordsrv.discord")),
-                );
+            for (args, level, node_name) in USAGES {
+                event.commands.push(Command::op(&format!("{root}{args}"), level).with_node(&node(node_name)));
             }
         }
     }

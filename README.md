@@ -138,6 +138,8 @@ What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: .
 - Death lines fall back to the generic text because the killer and item names are not passed to the hook.
 - Advancement announcements are not sent yet (title and announce flag are not readable).
 - Only a fixed set of message keys has a line; a server in another language gets English there.
+- `/discord reload`, `resync`, `debug` and `debugger` only answer; `/discord ?` is not a registered usage (a literal word cannot be `?`), use `/discord help`.
+- `discordsrv.silentjoin` / `silentquit` default to the owner level (the typed default has no "nobody"), so level-4 operators are silent unless the node is denied; the parent nodes `discordsrv.player` / `discordsrv.admin` are not declared (typed nodes have no children).
 
 ## Licence
 
