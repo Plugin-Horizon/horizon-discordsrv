@@ -258,6 +258,10 @@ impl Hooks for Mod {
             let result = host.commands().run_command_with_output(&command);
             bridge::console_output(&command, result.success, result.feedback);
         }
+        for name in work.mentions {
+            // MinecraftMentionSound: the note-block pling, to the mentioned player only.
+            host.commands().run_command(&format!("playsound minecraft:block.note_block.pling master {name} ~ ~ ~ 1 1"));
+        }
         for line in work.broadcasts {
             let text = legacy(&*host, &line);
             let _ = host.messages().broadcast(text);
@@ -408,7 +412,7 @@ impl Hooks for Mod {
         // permissions mod answers. The `<x>.others` forms are checked again inside the bridge.
         // NOTE: `link <player>` takes a word, not a player argument, so an offline player can be
         // linked as DiscordSRV allows.
-        const USAGES: [(&str, u8, &str); 19] = [
+        const USAGES: [(&str, u8, &str); 20] = [
             ("", 0, "discordsrv.discord"),
             (" help [command:word]", 0, "discordsrv.help"),
             (" link", 0, "discordsrv.link"),
@@ -428,6 +432,9 @@ impl Hooks for Mod {
             (" lang [language:word]", 2, "discordsrv.language"),
             (" setlang [language:word]", 2, "discordsrv.language"),
             (" debugger [action:word] [categories:text]", 2, "discordsrv.debug"),
+            // Any other word (`?`, or a word DiscordSRV answers with "That command doesn't exist!"):
+            // the registered words are literals, so `?` needs a word argument to get through the tree.
+            (" <sub:word> [args:text]", 0, "discordsrv.discord"),
         ];
         for root in ["discord", "discordsrv"] {
             for (args, level, node_name) in USAGES {

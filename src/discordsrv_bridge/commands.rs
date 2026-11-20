@@ -5,6 +5,7 @@
 use serde_json::json;
 
 use crate::discordsrv_bridge::chat;
+use crate::discordsrv_bridge::debugger;
 use crate::discordsrv_bridge::format::{fill, translate_ampersand, truncate};
 use crate::discordsrv_bridge::relay::Job;
 use crate::discordsrv_bridge::server::{ServerInfo, parse_uuid, uuid_string};
@@ -16,6 +17,43 @@ pub const OP_LEVEL: u8 = 2;
 /// The sender id of the console (and RCON, command blocks): no player has it. DiscordSRV's
 /// commands take a `CommandSender`, so they work from there too.
 pub const CONSOLE: u128 = 0;
+
+/// `RESYNC_WHEN_GROUP_SYNC_DISABLED`: group and role synchronisation is not ported, so it is always off.
+const RESYNC_DISABLED: &str =
+    "&cGroup synchonization requires valid GroupRoleSynchronizationGroupsAndRolesToSync entries in synchronization.yml";
+
+/// `CommandReload`: the config is read again and the bridge restarts with it.
+fn reload_lines() -> Vec<String> {
+    match crate::discordsrv_bridge::reload() {
+        Ok(true) => vec!["&bThe DiscordSRV config & lang have been reloaded.".to_string()],
+        Ok(false) => vec![
+            "&bThe DiscordSRV config & lang have been reloaded.".to_string(),
+            "&cDiscordSRV is switched off with the new config (see the server log).".to_string(),
+        ],
+        Err(e) => vec![format!("&c{e}")],
+    }
+}
+
+/// `/discord` while the bridge is off: `reload` (which may switch it on) and `debugger` still work, as
+/// they do in DiscordSRV with a failed connection; any other sub-command is the glue's "not connected".
+pub(crate) fn off_command(uuid: u128, args: &str, has: &dyn Fn(&str, u8) -> bool) -> Option<Vec<String>> {
+    let words: Vec<&str> = args.split(' ').filter(|w| !w.is_empty()).collect();
+    let (sub, rest) = words.split_first()?;
+    let command = find(&sub.to_ascii_lowercase())?;
+    if !matches!(command.names[0], "reload" | "debugger") {
+        return None;
+    }
+    let lines = if !has(command.permission, OP_LEVEL) {
+        vec!["&cYou do not have permission to perform this command.".to_string()]
+    } else if command.names[0] == "reload" {
+        reload_lines()
+    } else {
+        let facts = vec!["bridge: off (no token or no channel)".to_string()];
+        let dir = std::env::current_dir().unwrap_or_default().join("config").join("discordsrv");
+        debugger::run(rest, uuid == CONSOLE, &dir, &facts)
+    };
+    Some(lines.iter().map(|l| translate_ampersand(l)).collect())
+}
 
 const LINKING_ERROR: &str = "&cCurrently unable to link accounts due to an internal error. Contact your server administration team.";
 
@@ -238,16 +276,16 @@ impl Shared {
         }
         let lines = match command.names[0] {
             "broadcast" => self.cmd_broadcast(rest),
-            "debugger" => vec!["&cThe debugger is not part of this port.".to_string()],
+            "debugger" => {
+                let facts = self.debug_facts();
+                debugger::run(rest, uuid == CONSOLE, &self.usage_log_dir, &facts)
+            }
             "?" => help(has, rest, &c.unknown_command_message),
             "language" => cmd_language(rest),
             "link" => self.cmd_link(uuid, name, rest, has),
             "linked" => self.cmd_linked(uuid, rest, has),
-            "reload" => vec!["&cDiscordSRV cannot reload its config yet: restart the server to apply changes.".to_string()],
-            "resync" => vec![
-                "&cGroup synchonization requires valid GroupRoleSynchronizationGroupsAndRolesToSync entries in synchronization.yml"
-                    .to_string(),
-            ],
+            "reload" => reload_lines(),
+            "resync" => vec![RESYNC_DISABLED.to_string()],
             _ => self.cmd_unlink(uuid, name, rest, has),
         };
         lines.iter().map(|l| translate_ampersand(l)).collect()
@@ -451,6 +489,20 @@ impl Shared {
             }
         }
         vec![fill(&c.minecraft_nobody_found, &[("target", &joined)])]
+    }
+
+    /// The lines of a debug report: what is on, no IDs, no tokens, no log lines.
+    fn debug_facts(&self) -> Vec<String> {
+        let c = &self.config;
+        let st = self.lock_state();
+        vec![
+            format!("server version: {}", self.version),
+            format!("console channel: {}", if c.discord_console_channel_id.trim().is_empty() { "off" } else { "on" }),
+            format!("chat channels: {}", c.chat.channels.len()),
+            format!("gateway ready: {}", self.ready.load(std::sync::atomic::Ordering::Relaxed)),
+            format!("players online: {}", st.players.len()),
+            format!("config Debug categories: {}", c.chat.debug.join(", ")),
+        ]
     }
 
     /// Unlinks a player and queues the role and console commands that go with it.

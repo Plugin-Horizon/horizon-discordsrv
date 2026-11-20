@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use crate::discordsrv_bridge::chat::{self, FromDiscord, GameChat};
 use crate::discordsrv_bridge::console::java_date_format;
+use crate::discordsrv_bridge::debugger;
 use crate::discordsrv_bridge::format::{escape_markdown, fill, strip_codes, translate_ampersand, truncate};
 use crate::discordsrv_bridge::linking::CodeResult;
 use crate::discordsrv_bridge::server::{Player, uuid_string};
@@ -156,6 +157,7 @@ impl Shared {
         match outcome {
             // The server logs every broadcast, whatever BroadcastDiscordMessagesToConsole says (GAPS.md).
             FromDiscord::Broadcast { lines, truncated } => {
+                debugger::log("DISCORD_TO_MINECRAFT", &self.config.chat.debug, &format!("Broadcasting {} line(s) from channel {channel} to the game", lines.len()));
                 self.to_game.lock().unwrap_or_else(|e| e.into_inner()).broadcasts.extend(lines);
                 if truncated {
                     self.push_job(Job::React { channel, message: message_id, emoji: vec!["\u{1F4AC}", "\u{2757}"] });
@@ -564,7 +566,7 @@ impl Shared {
 pub fn chat_loop(shared: &Shared) {
     let c = &shared.config.chat;
     let main = c.channel_for("global").map(str::to_string);
-    let mut startup_sent = false;
+    let mut startup_sent = shared.suppress_startup.load(Ordering::Relaxed);
     let mut expiring: Vec<(Instant, String, String)> = Vec::new();
     let topic_every = Duration::from_secs(shared.config.channel_topic_updater_rate_in_minutes.max(1) * 60);
     let mut next_topic = Instant::now() + Duration::from_secs(5);
@@ -624,6 +626,9 @@ pub fn chat_loop(shared: &Shared) {
 
         if stopping {
             shared.drain_jobs(&mut expiring);
+            if shared.quiet_stop.load(Ordering::Relaxed) {
+                return;
+            }
             let text = c.discord_chat_channel_server_shutdown_message.trim();
             if let Some(channel) = c.channel_for("status").filter(|_| !text.is_empty()) {
                 shared.post_logged(channel, &no_mentions(text), "shutdown message");

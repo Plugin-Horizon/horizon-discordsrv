@@ -55,6 +55,14 @@ ChannelTopicUpdaterConsoleChannelTopicAtServerShutdownFormat = "Server is offlin
 # channel, and none of the chat features below do anything.
 Channels = []
 DiscordInviteLink = "https://discord.gg/changethisintheconfig.yml"
+# Play the note-block pling to an online player a Discord message mentions as @name.
+MinecraftMentionSound = true
+# Only English exists in this port; any other value is warned about at the start.
+ForcedLanguage = "none"
+# Only "default" (the server's time zone) is applied; any other value is warned about.
+Timezone = "default"
+# Debug categories always logged (DiscordSRV's Debug enum words, see /discord debugger).
+Debug = []
 # Empty uses https://crafatar.com/avatars/{uuid-nodashes}?size={size}&overlay
 AvatarUrl = ""
 # %date% in chat messages and notifications (Java SimpleDateFormat letters).

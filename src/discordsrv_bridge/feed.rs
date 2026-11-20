@@ -38,6 +38,11 @@ impl Feed {
         self.lines.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
     }
 
+    /// A reload starts a reader again: lines are kept from now on.
+    pub fn reopen(&self) {
+        self.closed.store(false, Ordering::Relaxed);
+    }
+
     /// Nothing reads the feed (no console channel, or the bridge stopped): drop what it holds
     /// and keep nothing from now on.
     pub fn close(&self) {

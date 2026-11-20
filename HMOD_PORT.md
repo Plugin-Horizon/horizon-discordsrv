@@ -1,4 +1,5 @@
 # hmod port: discordsrv
+Parity: before 73% -> after 75% (161/215 items; method: 10 commands + 21 nodes + 167 config keys named in the source + 17 features; blocked-by-API counts as not done)
 Round 1
 - Fixed:
   - `src/lib.rs` `console` tick: `host.server_run_command_captured` replaced by `host.commands().run_command_with_output` (`CommandResult.success` / `.feedback`).
@@ -19,3 +20,8 @@ Round 1
 Round 2 (parity fixes)
 - Fixed: `silentjoin`/`silentquit` default no longer operator (level 5, the highest); `silentquit` is read at login and used at logout and shutdown; `discordsrv.discord` defaults to everyone and each usage has its own node; `discordsrv.chat` (default everyone) gates chat relay; declared `unlink.others`, `nicknamesync`, `updatenotification`, `groupsyncwithcommands`; `/discord` now works from the console, RCON and command blocks (`run_mod_command`, console sender id `bridge::CONSOLE`, console answers for `link`, `linked`, `unlink` without arguments as in the original); the bridge-off permission line uses the sub-command's own node.
 - Gaps: `/discord reload` (config swap needs a bridge restart), `resync`, `debug(ger)`, `?` usage, `MinecraftMentionSound` and other unread config keys, parent nodes `discordsrv.player`/`discordsrv.admin`. Level-4 operators still hold the silent nodes (no "nobody" default).
+
+Round 3 (parity, written blind, not compiled)
+- Added: `/discord reload` (`bridge::reload`: old threads end quietly, config read again, new bridge started, also from "off"), `debugger.rs` (`/discord debugger` start/stop/upload to a local file, `Debug` list, two debug log points), catch-all usage `<sub:word> [args:text]` so `?` reaches the bridge, `MinecraftMentionSound` (`playsound ... pling`), keys `ForcedLanguage`, `Timezone`, `Debug`. `resync` keeps the original disabled-sync line.
+- Dropped finding: `/discord debug` is only usage text in plugin.yml; the original answers "doesn't exist".
+- Gaps (API): see GAPS_UPSTREAM.md (nobody default, parent nodes, advancement title, zones). Not done: webhooks.

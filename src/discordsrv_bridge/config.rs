@@ -57,6 +57,15 @@ pub struct Chat {
     /// `link` take their kind of message when present.
     pub channels: Vec<(String, String)>,
     pub discord_invite_link: String,
+    /// `MinecraftMentionSound` (default `true` in DiscordSRV): a Discord message that mentions an
+    /// online player as `@name` plays the note-block pling to them. Missing here: off.
+    pub minecraft_mention_sound: bool,
+    /// `ForcedLanguage`: only English exists in this port; any other value is warned about.
+    pub forced_language: String,
+    /// `Timezone`: `default` (the server's) is the only one applied; any other value is warned about.
+    pub timezone: String,
+    /// `Debug`: the categories of DiscordSRV's `Debug` enum logged all the time (`/discord debugger` adds more).
+    pub debug: Vec<String>,
     /// Avatar URL pattern: `{username}`, `{uuid}`, `{uuid-nodashes}`, `{size}`, `{texture}`.
     /// Empty: [`DEFAULT_AVATAR_URL`].
     pub avatar_url: String,

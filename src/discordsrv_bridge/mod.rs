@@ -8,6 +8,7 @@ pub mod chat;
 pub mod commands;
 pub mod config;
 pub mod console;
+pub mod debugger;
 pub mod embed;
 pub mod feed;
 pub mod format;
@@ -72,6 +73,10 @@ pub struct Shared {
     chat_filters: chat::ChatFilters,
     /// Which `DiscordGameStatus` entry the presence shows (see `gateway::status_entry`).
     pub status_index: AtomicUsize,
+    /// Set by a reload on the old bridge: its threads end without the shutdown message and topics.
+    quiet_stop: AtomicBool,
+    /// Set on the bridge a reload starts: the startup message was sent by the old one.
+    suppress_startup: AtomicBool,
     state: Mutex<State>,
     jobs: Mutex<VecDeque<relay::Job>>,
     to_game: Mutex<TickWork>,
@@ -99,6 +104,18 @@ pub struct TickWork {
     pub broadcasts: Vec<String>,
     /// `§`-coded lines for one player.
     pub tells: Vec<(u128, String)>,
+    /// Names of the players a Discord message mentioned as `@name` (`MinecraftMentionSound`): they
+    /// hear the note-block pling.
+    pub mentions: Vec<String>,
+}
+
+/// The players of `names` that `message` mentions as `@name`, as `PlayerUtil.notifyPlayersOfMentions`
+/// finds them: the colour-stripped, lower-cased text split on anything but letters, digits, `_` and `@`.
+pub fn mentioned(message: &str, names: &[String]) -> Vec<String> {
+    let plain = console::strip_colors(message).to_lowercase();
+    let cleaned: String = plain.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '@' { c } else { ' ' }).collect();
+    let words: HashSet<&str> = cleaned.split_whitespace().collect();
+    names.iter().filter(|n| words.contains(format!("@{}", n.to_lowercase()).as_str())).cloned().collect()
 }
 
 struct Running {
@@ -195,13 +212,44 @@ pub fn start(config_dir: &Path, server_version: String) {
     if slot.is_some() {
         return;
     }
-    if !start_inner(&mut slot, config_dir, server_version) {
+    *LAST_START.lock().unwrap_or_else(|e| e.into_inner()) = Some((config_dir.to_path_buf(), server_version.clone()));
+    if !start_inner(&mut slot, config_dir, server_version, false) {
         LOG_FEED.close();
     }
 }
 
+/// Where [`start`] was told to read its config, for [`reload`].
+static LAST_START: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
+
+/// `/discord reload`: reads the config again and restarts the bridge with it, as DiscordSRV's
+/// `CommandReload` does (config, channels, regexes, role aliases, channel updater). The old threads
+/// end without the shutdown message and topics, the new ones without the startup message; the
+/// gateway reconnects. Also starts a bridge that was off because of the old config. The caller is
+/// the server thread (a command), so nothing ticks meanwhile; the wait is at most five seconds.
+/// `Ok(true)`: the bridge runs again; `Ok(false)`: the new config switched it off (the log says why).
+pub fn reload() -> Result<bool, String> {
+    let (dir, version) =
+        LAST_START.lock().unwrap_or_else(|e| e.into_inner()).clone().ok_or("DiscordSRV was not started on this server")?;
+    let old = running().lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(r) = old {
+        r.shared.quiet_stop.store(true, Ordering::Relaxed);
+        r.shared.stop.store(true, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && r.threads.iter().any(|t| !t.is_finished()) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    LOG_FEED.reopen();
+    let mut slot = running().lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() && !start_inner(&mut slot, &dir, version, true) {
+        LOG_FEED.close();
+    }
+    Ok(slot.is_some())
+}
+
 /// [`start`]; false when the console channel will not run, so the log feed can close.
-fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: String) -> bool {
+/// `reload`: a restart of a bridge that already ran (no startup message).
+fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: String, reload: bool) -> bool {
     let dir = config_dir.join("discordsrv");
     let path = dir.join("config.toml");
     // The original DiscordSRV files (`plugins/DiscordSRV/config.yml` in the server folder, the
@@ -237,6 +285,14 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
     }
     if config.discord_console_channel_padding > 0 {
         log::warn!(target: "horizon_discordsrv", "[DiscordSRV] DiscordConsoleChannelPadding is not applied (see GAPS.md)");
+    }
+    let forced = config.chat.forced_language.trim().to_ascii_lowercase();
+    if !matches!(forced.as_str(), "" | "none" | "en" | "english") {
+        log::warn!(target: "horizon_discordsrv", "[DiscordSRV] ForcedLanguage is not applied: only English exists in this port");
+    }
+    let zone = config.chat.timezone.trim().to_ascii_lowercase();
+    if !matches!(zone.as_str(), "" | "default") {
+        log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Timezone is not applied: the server's time zone is used");
     }
     let console_on = !config.discord_console_channel_id.trim().is_empty();
     if !console_on && !config.chat.has_channels() {
@@ -278,13 +334,15 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
         replies: Mutex::new(Vec::new()),
         chat_console: Mutex::new(VecDeque::new()),
         usage_log_dir: dir,
-        started: AtomicBool::new(false),
+        started: AtomicBool::new(reload),
         last_tick_ms: AtomicU64::new(0),
         epoch: Instant::now(),
         server: server::ServerInfo::load(&home),
         version: server_version,
         chat_filters,
         status_index: AtomicUsize::new(0),
+        quiet_stop: AtomicBool::new(false),
+        suppress_startup: AtomicBool::new(reload),
         state: Mutex::new(State {
             cache: guild::Cache::default(),
             accounts,
@@ -343,6 +401,16 @@ pub fn tick(tps: f32, players: impl FnOnce() -> Vec<Player>) -> TickWork {
         st.ticks += 1;
     }
     let mut work = std::mem::take(&mut *sh.to_game.lock().unwrap_or_else(|e| e.into_inner()));
+    if sh.config.chat.minecraft_mention_sound && !work.broadcasts.is_empty() {
+        let names: Vec<String> = sh.lock_state().players.iter().map(|p| p.name.clone()).collect();
+        for line in &work.broadcasts {
+            for name in mentioned(line, &names) {
+                if !work.mentions.contains(&name) {
+                    work.mentions.push(name);
+                }
+            }
+        }
+    }
     work.commands.extend(sh.commands.lock().map(|mut q| q.drain(..).collect::<Vec<_>>()).unwrap_or_default());
     work.console.extend(sh.console_queue.lock().map(|mut q| q.drain(..).collect::<Vec<_>>()).unwrap_or_default());
     work
@@ -427,6 +495,7 @@ pub fn player_chat(uuid: u128, name: &str, message: &str) {
     if !chat.has_channels() || !chat.discord_chat_channel_minecraft_to_discord {
         return;
     }
+    debugger::log("MINECRAFT_TO_DISCORD", &chat.debug, &format!("Chat from {name} queued for Discord"));
     let dimension = sh.lock_state().players.iter().find(|p| p.uuid == uuid).map(|p| p.dimension.clone()).unwrap_or_default();
     sh.push_job(relay::Job::GameChat { player: Player { uuid, name: name.to_string(), dimension }, message: message.to_string() });
 }
@@ -458,7 +527,10 @@ pub const CONSOLE: u128 = commands::CONSOLE;
 /// `/discord [link|linked|unlink]` typed by a player (`args` without the `discord`): the
 /// `§`-coded answer lines, or None when the bridge isn't running (the command is not ours then).
 pub fn discord_command(uuid: u128, name: &str, args: &str, has: &dyn Fn(&str, u8) -> bool) -> Option<Vec<String>> {
-    shared().map(|sh| sh.discord_command(uuid, name, args, has))
+    match shared() {
+        Some(sh) => Some(sh.discord_command(uuid, name, args, has)),
+        None => commands::off_command(uuid, args, has),
+    }
 }
 
 impl Shared {
@@ -469,6 +541,8 @@ impl Shared {
             rest: rest::Rest::new("http://127.0.0.1:9", "test"),
             chat_filters: chat::ChatFilters::new(&config.chat).unwrap(),
             status_index: AtomicUsize::new(0),
+            quiet_stop: AtomicBool::new(false),
+            suppress_startup: AtomicBool::new(false),
             config,
             token: "test".into(),
             stop: AtomicBool::new(false),
@@ -648,7 +722,10 @@ fn console_loop(shared: &Shared, formatter: console::Formatter, version: &str) {
         }
         if stopping {
             let shutdown = &shared.config.channel_topic_updater_console_channel_topic_at_server_shutdown_format;
-            if shared.config.channel_topic_updater_channel_topics_at_shutdown_enabled && !shutdown.is_empty() {
+            if shared.config.channel_topic_updater_channel_topics_at_shutdown_enabled
+                && !shutdown.is_empty()
+                && !shared.quiet_stop.load(Ordering::Relaxed)
+            {
                 let _ = shared.rest.set_topic(&channel, &topic_text(shutdown, 0.0, version));
             }
             return;
@@ -693,6 +770,13 @@ fn memory_gb() -> (f64, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentions_find_online_players_by_at_name() {
+        let names = vec!["Alex".to_string(), "Steve_2".to_string()];
+        assert_eq!(mentioned("[§bDiscord§r] user » hi @alex, and @STEVE_2!", &names), vec!["Alex".to_string(), "Steve_2".to_string()]);
+        assert!(mentioned("[Discord] user » alex without the at", &names).is_empty());
+    }
 
     #[test]
     fn example_topics_fill_their_placeholders() {
