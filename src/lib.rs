@@ -30,7 +30,7 @@ use mod_api::{
     Command, CommandArgumentValue, CommandSource, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
     NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode, PermissionValueType,
     PlayerAdvancementDoneEvent, PlayerCommandEvent, PlayerDiedEvent, PlayerLoggedInEvent,
-    PlayerLoggedOutEvent, PlayerLoginEvent, RegisterCommandsEvent, RegisterConfigsEvent,
+    PlayerLoggedOutEvent, PlayerLoginEvent, RegisterNodeCommandsEvent, RegisterConfigsEvent,
     RunModCommandEvent, ServerAboutToStartEvent, ServerChatEvent, ServerHost, ServerStoppingEvent, ServerTickEvent,
     ServerTickPhase, Text,
 };
@@ -455,7 +455,7 @@ impl Hooks for Mod {
         }
     }
 
-    fn register_commands(&self, _: &mut dyn ServerHost, event: &mut RegisterCommandsEvent<'_>) {
+    fn register_node_commands(&self, _: &mut dyn ServerHost, event: &mut RegisterNodeCommandsEvent<'_>) {
         // Registered even when the bridge is off, so the commands answer with the line above.
         // Each usage names its own DiscordSRV node, as in the original's `plugin.yml` (the root
         // `discordsrv.discord` is everyone's). A usage keeps its level as the fallback when no
