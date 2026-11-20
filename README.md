@@ -1,5 +1,9 @@
 # horizon-discordsrv
 
+## Port status
+
+Compared with DiscordSRV 1.30.x: **80 %** of the original's commands, permissions, config keys, messages and features work today; **81 %** once our open Horizon PRs are merged; **81 %** with the engine changes we are writing; **81 %** with the newest Horizon SDK. Counted on 172/215 items (see HMOD_PORT.md). Status: not yet compiled after the 2026-11-20 round.
+
 > **Unofficial Rust port of DiscordSRV for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the DiscordSRV authors.**
 
 Not affiliated with DiscordSRV.
