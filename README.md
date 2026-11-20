@@ -78,9 +78,9 @@ This is a native trait mod: `horizon-mod.toml`, a `Cargo.toml` that depends on `
   is deleted; blocked roles get a cross, truncated messages a speech bubble and an exclamation mark;
   each attachment (three at most) and sticker is a line of its own.
 
-Not ported (see the Known gaps section): webhook delivery, group/nickname/ban synchronisation, "require linked account to play", voice, alerts,
-rotating statuses, per-channel formats, `/discord reload` and `resync` (they answer only),
-`language` and `debugger`. What Horizon lacks
+Webhook delivery is ported (see Config). Not ported (see the Known gaps section): group/nickname/ban
+synchronisation, the membership, subscriber, whitelist and ban checks of "require linked account to play", voice, alerts,
+rotating statuses, per-channel formats, `/discord resync` (it answers only). What Horizon lacks
 for the rest is in the Known gaps section.
 
 ## Config
@@ -107,7 +107,8 @@ of 0.1.0 works unchanged. Differences:
 - Formats take MiniMessage colour/decoration tags (`<aqua>`, `</aqua>`, `<reset>`, `<#55ffff>`,
   approximated to the sixteen chat colours) and `&` codes.
 - Notifications are TOML tables named like messages.yml's (`[MinecraftPlayerJoinMessage]`,
-  `[MinecraftPlayerJoinMessage.Embed]`, `Author = { ImageUrl, Name, Url }`); `Webhook` is not read.
+  `[MinecraftPlayerJoinMessage.Embed]`, `Author = { ImageUrl, Name, Url }`); a `Webhook` table (`Enable`, `Name`,
+  `AvatarUrl`) sends the notice through the bot's webhook under that name and avatar.
 - `AvatarUrl` empty means `https://crafatar.com/avatars/{uuid-nodashes}?size={size}&overlay`.
 - `AccountsFile` (default `accounts.aof`, beside the config) holds the links, one
   `<discord id> <uuid>` line each.
@@ -135,12 +136,26 @@ horizon-launcher native-build <path to this folder> --server-output <dir> --vers
 What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: ...)` in `src/lib.rs`):
 
 - Off by default: set a console channel, chat channels and a token file to switch things on.
+- Webhook delivery (`Experiment_WebhookChatMessageDelivery`): the bot makes a webhook named `DiscordSRV` in each
+  chat channel it posts to (it needs Manage Webhooks) and keeps it for the run; webhook URLs are never written to a
+  file or a log. `Experiment_WebhookChatMessageUsernameFilters` is read by the original but never applied there, so it is not read here.
+- `Require linked account to play` (linking.yml): an unlinked player is refused at login with the kick text (`{BOT}`,
+  `{CODE}`, `{INVITE}`), bypass names and the still-starting text are read. Not checked: the Discord server membership
+  (`Must be in Discord server`, on by default in the original), the subscriber roles, the vanilla whitelist, the ban
+  checks, the "kicked for unlinking" text (no kick on unlink).
+- Silent join and quit (`discordsrv.silentjoin` / `silentquit`) default to nobody only with the cargo feature
+  `horizon_perm_nobody` (the engine's `NodeDefault::Nobody`, horizon-rust/horizon PR 18754, not in the pin). Without it they
+  default to level 5 (the owner), so operators are not silent.
+- Death notices name only the causes in the table of `vanilla_line` (the common ones without a killer). A player killed by
+  a player or a mob is announced with the generic "died" line: the killer and the held item are not known to the hook.
 - Death lines fall back to the generic text because the killer and item names are not passed to the hook.
 - Advancement announcements are not sent yet (title and announce flag are not readable).
 - Only a fixed set of message keys has a line; a server in another language gets English there.
 - `/discord reload` re-reads the config and restarts the bridge (the gateway reconnects; no shutdown or startup message). `/discord resync` answers DiscordSRV's "group synchonization requires valid ... entries" line, because group and role synchronisation is not ported. `/discord debugger` switches the debug categories (`[<CATEGORY> DEBUG]` log lines for chat in both directions; the `Debug` config list works too); `/discord debugger upload` writes a report file under `config/discordsrv/debug/` instead of uploading it to a paste service. `/discord debug` does not exist in DiscordSRV 1.30 either (only its usage text mentions it): it answers "That command doesn't exist!".
-- Config keys read: `MinecraftMentionSound` (the note-block pling to an online player a Discord message mentions as `@name`), `ForcedLanguage` and `Timezone` (only `none`/English and `default` are applied; others warn), `Debug`. Not read: webhook delivery (`Experiment_Webhook*` and the `Webhook` part of the notices), `Experiment_Jdbc*`, `Experiment_MCDiscordReserializer_*`, the proxy settings, `ForceTLSv`, `NoopHostnameVerifier`, `DisabledPluginHooks`, `UseModernPaperChatEvent`, `VentureChatBungee`, `EnablePresenceInformation`, the DNS key.
-- `discordsrv.silentjoin` / `silentquit` default to the owner level (the typed default has no "nobody"), so level-4 operators are silent unless the node is denied; the parent nodes `discordsrv.player` / `discordsrv.admin` are not declared (typed nodes have no children).
+- Config keys read: `MinecraftMentionSound` (the note-block pling to an online player a Discord message mentions as `@name`), `ForcedLanguage` and `Timezone` (only `none`/English and `default` are applied; others warn), `Debug`, the webhook keys and the `Webhook` part of the notices. Not read: `Experiment_Jdbc*`, `Experiment_MCDiscordReserializer_*`, the proxy settings, `ForceTLSv`, `NoopHostnameVerifier`, `DisabledPluginHooks`, `UseModernPaperChatEvent`, `VentureChatBungee`, `EnablePresenceInformation`, the DNS key.
+- `discordsrv.silentjoin` / `silentquit` default to nobody only with the feature `horizon_perm_nobody` (see above). Without it they default to level 5, so the owner is silent by default; the parent nodes `discordsrv.player` / `discordsrv.admin` are not declared (typed nodes have no children).
+- Not applicable on Horizon: `discordsrv.updatenotification` (DiscordSRV's update check has no counterpart here, so nobody is told of an update), `DisabledPluginHooks`, `VentureChatBungee`, `UseModernPaperChatEvent`, `NoopHostnameVerifier`, `ForceTLSv`, the DNS key, `EnablePresenceInformation` (it only feeds PlaceholderAPI placeholders, which Horizon does not have).
+- Not ported: `Experiment_JdbcAccountLinkBackend` and the `Experiment_JdbcTablePrefix` / user / password keys (the link file is `accounts.aof` only), the `Experiment_MCDiscordReserializer_*` keys (the colour-to-Discord-markdown experiment), the proxy keys (ureq can use a proxy for REST, the gateway cannot yet).
 
 ## Licence
 
