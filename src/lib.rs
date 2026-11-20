@@ -64,15 +64,38 @@ fn legacy(host: &dyn ServerHost, line: &str) -> Text {
 /// text for any key; until then only these keys have a line, and a server in another language gets
 /// English here.
 fn vanilla_line(key: &str, name: &str) -> Option<String> {
-    match key {
-        "multiplayer.player.joined" => Some(format!("{name} joined the game")),
-        "multiplayer.player.left" => Some(format!("{name} left the game")),
-        "death.attack.generic" => Some(format!("{name} died")),
-        _ => None,
-    }
+    let text = match key {
+        "multiplayer.player.joined" => "{name} joined the game",
+        "multiplayer.player.left" => "{name} left the game",
+        // The death messages the game builds without a killer (its key comes with the death).
+        "death.attack.generic" => "{name} died",
+        "death.attack.lava" => "{name} tried to swim in lava",
+        "death.attack.drown" => "{name} drowned",
+        "death.attack.fall" => "{name} hit the ground too hard",
+        "death.attack.starve" => "{name} starved to death",
+        "death.attack.cactus" => "{name} was pricked to death",
+        "death.attack.explosion" => "{name} blew up",
+        "death.attack.onFire" => "{name} burned to death",
+        "death.attack.inFire" => "{name} went up in flames",
+        "death.attack.inWall" => "{name} suffocated in a wall",
+        "death.attack.outOfWorld" => "{name} fell out of the world",
+        "death.attack.magic" => "{name} was killed by magic",
+        "death.attack.wither" => "{name} withered away",
+        "death.attack.anvil" => "{name} was squashed by a falling anvil",
+        "death.attack.fallingBlock" => "{name} was squashed by a falling block",
+        "death.attack.dragonBreath" => "{name} was roasted in dragon breath",
+        "death.attack.freeze" => "{name} froze to death",
+        "death.attack.sweetBerryBush" => "{name} was poked to death by a sweet berry bush",
+        "death.attack.stalagmite" => "{name} was impaled on a stalagmite",
+        "death.attack.lightningBolt" => "{name} was struck by lightning",
+        _ => return None,
+    };
+    Some(text.replace("{name}", name))
 }
 
 /// The death line: the cause's key when it has a line, else the generic one.
+/// The English texts are vanilla's `en_us` lines for the keys listed in [`vanilla_line`]. A key
+/// without a line (the killer's kinds, `death.attack.player` and friends) falls back to the generic line.
 /// TODO(arismoko-api: player_died_v2): the killer's and item's names are not known here, so
 /// `death.attack.player` and friends fall back to the generic line.
 fn death_line(cause: Option<&str>, name: &str) -> String {
@@ -82,10 +105,14 @@ fn death_line(cause: Option<&str>, name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The level of a node that nobody has by default (DiscordSRV's `default: false`). Without the
+/// engine's `NodeDefault::Nobody` (feature `horizon_perm_nobody`) it is declared at level 5, the
+/// owner level.
+const NOBODY: u8 = u8::MAX;
+
 /// Every permission node the bridge asks, with the operator level it defaults to (0: everyone, 2:
-/// operators, 5: nobody; the typed default has no "nobody" level, so 5 is the highest one, the
-/// owner level). Declared in `permission_gather_nodes`; a node not listed here is answered as denied.
-/// DiscordSRV's `plugin.yml` has the same defaults (`default: true`, `op`, `false`).
+/// operators, `NOBODY`: nobody). Declared in `permission_gather_nodes`; a node not listed here is
+/// answered as denied. DiscordSRV's `plugin.yml` has the same defaults (`default: true`, `op`, `false`).
 const NODES: [(&str, u8); 19] = [
     ("discordsrv.bcast", 2),
     ("discordsrv.debug", 2),
@@ -98,8 +125,8 @@ const NODES: [(&str, u8); 19] = [
     ("discordsrv.unlink", 2),
     ("discordsrv.link.others", 2),
     ("discordsrv.linked.others", 2),
-    ("discordsrv.silentjoin", 5),
-    ("discordsrv.silentquit", 5),
+    ("discordsrv.silentjoin", NOBODY),
+    ("discordsrv.silentquit", NOBODY),
     ("discordsrv.discord", 0),
     ("discordsrv.chat", 0),
     ("discordsrv.unlink.others", 2),
@@ -107,6 +134,23 @@ const NODES: [(&str, u8); 19] = [
     ("discordsrv.updatenotification", 2),
     ("discordsrv.groupsyncwithcommands", 2),
 ];
+
+/// The default of a declared node: its operator level, or nobody (`NOBODY`).
+#[cfg(feature = "horizon_perm_nobody")]
+fn node_default(level: u8) -> NodeDefault {
+    if level == NOBODY {
+        NodeDefault::Nobody
+    } else {
+        NodeDefault::Level(PermissionLevel::from_level(i32::from(level)))
+    }
+}
+
+/// The same without `NodeDefault::Nobody`: a nobody node is declared at level 5 (the owner level),
+/// so an operator (level 4) is not silent by default.
+#[cfg(not(feature = "horizon_perm_nobody"))]
+fn node_default(level: u8) -> NodeDefault {
+    NodeDefault::Level(PermissionLevel::from_level(i32::from(level.min(5))))
+}
 
 /// A Boolean permission node named `name`.
 fn node(name: &str) -> PermissionNode {
@@ -226,7 +270,7 @@ impl Hooks for Mod {
             for player in players {
                 let name = player.name(&*host).unwrap_or_default();
                 let line = vanilla_line("multiplayer.player.left", &name).unwrap_or_default();
-                let silent = has_node(&mut *host, player.uuid(), "discordsrv.silentquit", 5);
+                let silent = has_node(&mut *host, player.uuid(), "discordsrv.silentquit", NOBODY);
                 bridge::player_leave(player.uuid(), &name, &line, silent);
             }
         }
@@ -293,8 +337,8 @@ impl Hooks for Mod {
         }
         let message = vanilla_line("multiplayer.player.joined", &event.name).unwrap_or_default();
         // discordsrv.silentjoin, default nobody in DiscordSRV's plugin.yml.
-        let silent = has_node(&mut *host, event.player, "discordsrv.silentjoin", 5);
-        if has_node(&mut *host, event.player, "discordsrv.silentquit", 5) {
+        let silent = has_node(&mut *host, event.player, "discordsrv.silentjoin", NOBODY);
+        if has_node(&mut *host, event.player, "discordsrv.silentquit", NOBODY) {
             lock_set(&self.silent_quit).insert(event.player);
         }
         bridge::player_join(event.player, &event.name, &message, silent);
@@ -401,7 +445,7 @@ impl Hooks for Mod {
 
     fn permission_gather_nodes(&self, event: &mut PermissionGatherNodesEvent<'_>) {
         for (name, level) in NODES {
-            let _ = event.nodes.add(node(name), NodeDefault::Level(PermissionLevel::from_level(i32::from(level))));
+            let _ = event.nodes.add(node(name), node_default(level));
         }
     }
 
@@ -441,5 +485,30 @@ impl Hooks for Mod {
                 event.commands.push(Command::op(&format!("{root}{args}"), level).with_node(&node(node_name)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_death_keys_have_vanilla_english_lines() {
+        assert_eq!(death_line(Some("death.attack.lava"), "Tester"), "Tester tried to swim in lava");
+        assert_eq!(death_line(Some("death.attack.fall"), "Tester"), "Tester hit the ground too hard");
+        assert_eq!(death_line(Some("death.attack.freeze"), "Tester"), "Tester froze to death");
+    }
+
+    #[test]
+    fn unknown_or_missing_death_keys_fall_back_to_the_generic_line() {
+        assert_eq!(death_line(Some("death.attack.player"), "Tester"), "Tester died");
+        assert_eq!(death_line(None, "Tester"), "Tester died");
+    }
+
+    #[test]
+    fn join_and_leave_lines_keep_their_text() {
+        assert_eq!(vanilla_line("multiplayer.player.joined", "Tester").as_deref(), Some("Tester joined the game"));
+        assert_eq!(vanilla_line("multiplayer.player.left", "Tester").as_deref(), Some("Tester left the game"));
+        assert_eq!(vanilla_line("no.such.key", "Tester"), None);
     }
 }
