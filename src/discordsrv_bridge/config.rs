@@ -91,6 +91,10 @@ pub struct Chat {
     pub discord_chat_channel_roles_allowed_to_use_color_codes_in_chat: Vec<String>,
     pub discord_chat_channel_broadcast_discord_messages_to_console: bool,
     pub discord_chat_channel_require_linked_account: bool,
+    /// `Require linked account to play` (linking.yml): logins need a linked account. Its
+    /// membership, subscriber, whitelist and ban checks are not ported (see the README).
+    #[serde(rename = "Require linked account to play")]
+    pub require_linked_account_to_play: RequireLinked,
     pub discord_chat_channel_block_bots: bool,
     pub discord_chat_channel_block_webhooks: bool,
     /// `Experiment_WebhookChatMessageDelivery` (default false): a player's chat goes out through the
@@ -194,6 +198,30 @@ pub struct Chat {
     pub linking_error: String,
     pub click_to_copy_code: String,
     pub discord_linked_account_check_failed: String,
+}
+
+/// The `Require linked account to play` section of linking.yml.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RequireLinked {
+    #[serde(rename = "Enabled")]
+    pub enabled: bool,
+    /// Minecraft names let in without a link.
+    #[serde(rename = "Bypass names")]
+    pub bypass_names: Vec<String>,
+    /// Kick text of a player without a link (`{BOT}`, `{CODE}`, `{INVITE}`, `&` codes); empty: the default.
+    #[serde(rename = "Not linked message")]
+    pub not_linked_message: String,
+    #[serde(rename = "Messages")]
+    pub messages: RequireLinkedMessages,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RequireLinkedMessages {
+    /// Kick text while the bridge has not connected to Discord yet; empty: the default.
+    #[serde(rename = "DiscordSRV still starting")]
+    pub still_starting: String,
 }
 
 /// One `ChannelUpdater` entry: a channel whose name shows server information.
@@ -405,6 +433,18 @@ mod tests {
         assert!(c.minecraft_player_join_message.webhook.enable);
         assert!(!c.minecraft_player_join_message.webhook.enabled);
         assert_eq!(c.minecraft_player_join_message.webhook.name, "Server");
+    }
+
+    #[test]
+    fn the_require_linked_section_reads_its_original_names() {
+        let c = Config::parse(DEFAULT_CONFIG).unwrap().chat;
+        assert!(!c.require_linked_account_to_play.enabled);
+        assert!(c.require_linked_account_to_play.bypass_names.is_empty());
+        let text = DEFAULT_CONFIG.replace("Enabled = false\n\"Bypass names\" = []", "Enabled = true\n\"Bypass names\" = [\"Scarsz\"]");
+        assert_ne!(text, DEFAULT_CONFIG);
+        let on = Config::parse(&text).unwrap().chat.require_linked_account_to_play;
+        assert!(on.enabled);
+        assert_eq!(on.bypass_names, vec!["Scarsz".to_string()]);
     }
 
     #[test]

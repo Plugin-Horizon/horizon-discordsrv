@@ -441,6 +441,38 @@ pub fn player_login(uuid: u128) {
     }
 }
 
+/// `Require linked account to play`: the kick text of a login that must be refused, None to let the
+/// player in. Bypass names and an off rule let everyone in; so does a player whose account is linked.
+pub fn login_refusal(uuid: u128, name: &str) -> Option<String> {
+    let sh = shared()?;
+    let rule = &sh.config.chat.require_linked_account_to_play;
+    if !rule.enabled || rule.bypass_names.iter().any(|b| b.eq_ignore_ascii_case(name)) {
+        return None;
+    }
+    if !sh.ready.load(Ordering::Relaxed) {
+        let text = rule.messages.still_starting.as_str();
+        let text = if text.trim().is_empty() { STILL_STARTING } else { text };
+        return Some(text.to_string());
+    }
+    let mut st = sh.lock_state();
+    if st.accounts.discord_of(uuid).is_some() {
+        return None;
+    }
+    let code = st.accounts.new_code(uuid, name);
+    let template = rule.not_linked_message.as_str();
+    let template = if template.trim().is_empty() { NOT_LINKED } else { template };
+    Some(not_linked_text(template, &st.cache.bot_name, &code, &sh.config.chat.discord_invite_link))
+}
+
+/// DiscordSRV's default kick texts (linking.yml, `&` codes).
+const NOT_LINKED: &str = "&7You must link your &9Discord &7account to play.\n\n&7Send a DM to &b{BOT}&7 in the Discord server containing just &b{CODE}&7 to link your account.\n\n&7Discord Invite » &b{INVITE}";
+const STILL_STARTING: &str = "&cCurrently unavailable to check link status because the server is still connecting to Discord.\n\nTry again in a minute.";
+
+/// A kick text with its placeholders filled.
+pub fn not_linked_text(template: &str, bot: &str, code: &str, invite: &str) -> String {
+    template.replace("\\n", "\n").replace("{BOT}", bot).replace("{CODE}", code).replace("{INVITE}", invite)
+}
+
 /// The fake players (a mod's bots with no client) that joined: they get no join, leave or death notice.
 static FAKES: std::sync::Mutex<std::collections::BTreeSet<u128>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
 
@@ -823,6 +855,13 @@ mod tests {
         sh.console_command_with(message("12", "op me"), None);
         assert_eq!(sh.console_queue.lock().unwrap().drain(..).collect::<Vec<_>>(), vec!["op me".to_string()]);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_not_linked_text_fills_bot_code_and_invite() {
+        let text = not_linked_text("Link {CODE} to {BOT} at {INVITE}", "Bridge", "1234", "https://example.invalid/x");
+        assert_eq!(text, "Link 1234 to Bridge at https://example.invalid/x");
+        assert!(NOT_LINKED.contains("{CODE}") && NOT_LINKED.contains("{BOT}") && NOT_LINKED.contains("{INVITE}"));
     }
 
     #[test]

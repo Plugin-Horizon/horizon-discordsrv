@@ -324,9 +324,15 @@ impl Hooks for Mod {
         bridge::log_line(event.level, event.message);
     }
 
-    fn player_login(&self, _: &mut dyn ServerHost, event: &mut PlayerLoginEvent<'_>) -> Flow {
-        // The bridge looks for the player's file to tell a first join. It refuses nobody.
+    fn player_login(&self, host: &mut dyn ServerHost, event: &mut PlayerLoginEvent<'_>) -> Flow {
+        // The bridge looks for the player's file to tell a first join.
         bridge::player_login(event.player);
+        // `Require linked account to play` (linking.yml): an unlinked player is refused with the message.
+        if let Some(message) = bridge::login_refusal(event.player, event.name) {
+            let text = bridge::format::translate_ampersand(&message);
+            *event.reason = Some(legacy(&*host, &text));
+            return Flow::Cancel;
+        }
         Flow::Continue
     }
 

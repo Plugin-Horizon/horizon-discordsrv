@@ -232,3 +232,14 @@ Enabled = true
 Color = "#ffd700"
 Author = { ImageUrl = "%embedavatarurl%", Name = "%username% has made the advancement %achievement%!", Url = "" }
 Timestamp = false
+
+# Require linked account to play (linking.yml). Off: anyone may log in. On: an unlinked player is
+# refused with the kick text; {BOT}, {CODE} and {INVITE} are filled in. Empty texts use the defaults.
+# The membership, subscriber role, whitelist and ban checks of DiscordSRV are not ported.
+["Require linked account to play"]
+Enabled = false
+"Bypass names" = []
+"Not linked message" = ""
+
+["Require linked account to play".Messages]
+"DiscordSRV still starting" = ""

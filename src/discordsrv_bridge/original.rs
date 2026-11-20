@@ -96,8 +96,11 @@ fn is_real_id(id: &str) -> bool {
 fn unported(root: &Map<String, Value>) -> Vec<&'static str> {
     let on = |k: &str| root.get(k).and_then(Value::as_bool) == Some(true);
     let mut out = Vec::new();
-    if on("Require linked account to play") {
-        out.push("linking.yml: require linked account to play");
+    // A section, not a switch: `Enabled` inside it. Ported: the login refusal, bypass names and the
+    // kick texts. Not ported: the membership, subscriber role, vanilla whitelist and ban checks.
+    let linking = root.get("Require linked account to play").and_then(|v| v.get("Enabled")).and_then(Value::as_bool);
+    if linking == Some(true) {
+        out.push("linking.yml: require linked account to play (membership, subscriber, whitelist and ban checks)");
     }
     if on("NicknameSynchronizationEnabled") {
         out.push("synchronization.yml: nickname synchronisation");
