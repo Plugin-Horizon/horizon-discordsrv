@@ -93,6 +93,22 @@ pub struct Chat {
     pub discord_chat_channel_require_linked_account: bool,
     pub discord_chat_channel_block_bots: bool,
     pub discord_chat_channel_block_webhooks: bool,
+    /// `Experiment_WebhookChatMessageDelivery` (default false): a player's chat goes out through the
+    /// bot's webhook in the chat channel (named `DiscordSRV`) instead of a message of the bot.
+    #[serde(rename = "Experiment_WebhookChatMessageDelivery")]
+    pub experiment_webhook_chat_message_delivery: bool,
+    /// `Experiment_WebhookChatMessageUsernameFormat`; empty: `%displayname%`.
+    #[serde(rename = "Experiment_WebhookChatMessageUsernameFormat")]
+    pub experiment_webhook_chat_message_username_format: String,
+    /// `Experiment_WebhookChatMessageFormat`; empty: `%message%`.
+    #[serde(rename = "Experiment_WebhookChatMessageFormat")]
+    pub experiment_webhook_chat_message_format: String,
+    /// `Experiment_WebhookChatMessageUsernameFromDiscord`: the linked Discord member's name.
+    #[serde(rename = "Experiment_WebhookChatMessageUsernameFromDiscord")]
+    pub experiment_webhook_chat_message_username_from_discord: bool,
+    /// `Experiment_WebhookChatMessageAvatarFromDiscord`: the linked Discord member's avatar.
+    #[serde(rename = "Experiment_WebhookChatMessageAvatarFromDiscord")]
+    pub experiment_webhook_chat_message_avatar_from_discord: bool,
     pub discord_chat_channel_blocked_ids: Vec<String>,
     pub discord_chat_channel_blocked_roles_as_whitelist: bool,
     pub discord_chat_channel_blocked_roles_ids: Vec<String>,
@@ -191,14 +207,25 @@ pub struct ChannelUpdater {
     pub update_interval: u64,
 }
 
-/// A notification of messages.yml (`MinecraftPlayerJoinMessage` and its siblings). Webhook
-/// delivery is not ported (see the README).
+/// A notification of messages.yml (`MinecraftPlayerJoinMessage` and its siblings).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct MessageTemplate {
     pub enabled: bool,
     pub content: String,
     pub embed: EmbedTemplate,
+    pub webhook: NoticeWebhook,
+}
+
+/// The `Webhook` section of a notification: sent under this name and avatar through a webhook
+/// (`Enable` is DiscordSRV's other spelling of `Enabled`). Empty name and avatar: the bot's.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct NoticeWebhook {
+    pub enabled: bool,
+    pub enable: bool,
+    pub name: String,
+    pub avatar_url: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -365,6 +392,19 @@ mod tests {
         assert_eq!(c.discord_console_channel_prefix, "[{date} {level}{name}] ");
         assert_eq!(c.channel_topic_updater_rate_in_minutes, 10);
         assert_eq!(c.discord_game_status, vec!["playing Minecraft".to_string()]);
+    }
+
+    #[test]
+    fn the_webhook_keys_read_their_original_names() {
+        let text = format!("{DEFAULT_CONFIG}\n[MinecraftPlayerJoinMessage.Webhook]\nEnable = true\nName = \"Server\"\n");
+        let c = Config::parse(&text).unwrap().chat;
+        assert!(!c.experiment_webhook_chat_message_delivery);
+        assert_eq!(c.experiment_webhook_chat_message_username_format, "%displayname%");
+        assert_eq!(c.experiment_webhook_chat_message_format, "%message%");
+        assert!(!c.experiment_webhook_chat_message_avatar_from_discord);
+        assert!(c.minecraft_player_join_message.webhook.enable);
+        assert!(!c.minecraft_player_join_message.webhook.enabled);
+        assert_eq!(c.minecraft_player_join_message.webhook.name, "Server");
     }
 
     #[test]

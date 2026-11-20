@@ -83,6 +83,13 @@ DiscordChatChannelBroadcastDiscordMessagesToConsole = true
 DiscordChatChannelRequireLinkedAccount = false
 DiscordChatChannelBlockBots = false
 DiscordChatChannelBlockWebhooks = true
+# Webhook delivery (DiscordSRV's Experiment_ keys). Off: messages from the bot. On: a webhook named
+# DiscordSRV per chat channel, made by the bot (it needs Manage Webhooks). Keep block-webhooks on.
+Experiment_WebhookChatMessageDelivery = false
+Experiment_WebhookChatMessageUsernameFormat = "%displayname%"
+Experiment_WebhookChatMessageFormat = "%message%"
+Experiment_WebhookChatMessageUsernameFromDiscord = false
+Experiment_WebhookChatMessageAvatarFromDiscord = false
 DiscordChatChannelBlockedIds = []
 DiscordChatChannelBlockedRolesAsWhitelist = false
 DiscordChatChannelBlockedRolesIds = []

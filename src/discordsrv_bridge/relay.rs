@@ -95,7 +95,9 @@ impl Shared {
             return;
         }
         let webhook = d.get("webhook_id").is_some_and(|w| !w.is_null());
-        if webhook && c.discord_chat_channel_block_webhooks {
+        // The bot's own webhook (webhook delivery) is never echoed back, whatever the block setting.
+        let own = webhook && self.rest.owns_webhook(d["webhook_id"].as_str().unwrap_or_default());
+        if webhook && (c.discord_chat_channel_block_webhooks || own) {
             return;
         }
         // The link channel takes codes from people (and nothing else), whatever UsePM says.
@@ -449,13 +451,30 @@ impl Shared {
                 ];
                 if let Some(mut body) = embed::render(template, &pairs, Utc::now().timestamp()) {
                     body["allowed_mentions"] = json!({ "parse": [] });
-                    self.post_logged(channel, &body, "notification");
+                    let hook = &template.webhook;
+                    if hook.enabled || hook.enable {
+                        // The notification goes out under the webhook's name and avatar (`%botname%`, `%botavatarurl%` by default).
+                        let name_pattern = if hook.name.trim().is_empty() { "%botname%" } else { hook.name.as_str() };
+                        let avatar_pattern = if hook.avatar_url.trim().is_empty() { "%botavatarurl%" } else { hook.avatar_url.as_str() };
+                        let name: String = fill(name_pattern, &pairs).trim().chars().take(80).collect();
+                        body["username"] = json!(name);
+                        body["avatar_url"] = json!(fill(avatar_pattern, &pairs).trim());
+                        if let Err(e) = self.rest.execute_webhook(channel, &body) {
+                            log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't send the notification as a webhook: {e}");
+                        }
+                    } else {
+                        self.post_logged(channel, &body, "notification");
+                    }
                 }
             }
             Job::GameChat { player, message } => {
                 let Some(channel) = c.channel_for("global") else { return };
                 let world = self.server.world_name(&player.dimension);
                 let date = self.date_now();
+                if c.experiment_webhook_chat_message_delivery {
+                    self.webhook_chat(channel, &player, &message, &world, &date);
+                    return;
+                }
                 let content = {
                     let st = self.lock_state();
                     let m = GameChat {
@@ -508,6 +527,44 @@ impl Shared {
                 let discord_name = self.lock_state().cache.members.get(&discord).map(|m| m.username.clone()).unwrap_or_default();
                 self.link_commands(&c.minecraft_discord_account_unlinked_console_commands, &discord, &discord_name, uuid, &name);
             }
+        }
+    }
+
+    /// A player's chat through the bot's webhook in the channel (`Experiment_WebhookChatMessageDelivery`).
+    /// The linked Discord member, when there is one, names the message and gives its avatar if asked.
+    fn webhook_chat(&self, channel: &str, player: &Player, message: &str, world: &str, date: &str) {
+        let c = &self.config.chat;
+        let built = {
+            let st = self.lock_state();
+            let member = st.accounts.discord_of(player.uuid).and_then(|id| st.cache.members.get(id)).cloned();
+            let game = GameChat {
+                username: &player.name,
+                display_name: &player.name,
+                message,
+                // No permissions/groups API between mods (GAPS.md).
+                primary_group: "",
+                world,
+                date,
+                channel: "global",
+            };
+            chat::webhook_message(c, &self.chat_filters, &st.cache, &game, member.as_ref()).map(|(name, content)| {
+                let avatar = member
+                    .as_ref()
+                    .filter(|_| c.experiment_webhook_chat_message_avatar_from_discord)
+                    .map(|m| m.avatar_url.clone())
+                    .unwrap_or_else(|| embed::avatar_url(&c.avatar_url, &player.name, player.uuid, 128));
+                (name, content, avatar)
+            })
+        };
+        let Some((name, content, avatar)) = built else { return };
+        let body = json!({
+            "username": name,
+            "avatar_url": avatar,
+            "content": content,
+            "allowed_mentions": chat::allowed_mentions(c),
+        });
+        if let Err(e) = self.rest.execute_webhook(channel, &body) {
+            log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't send the chat message as a webhook: {e}");
         }
     }
 

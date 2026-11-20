@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use crate::discordsrv_bridge::config::Chat;
 use crate::discordsrv_bridge::console::Filters;
 use crate::discordsrv_bridge::format::{escape_markdown, fill, nearest_color, strip_codes, to_legacy, translate_ampersand, truncate};
-use crate::discordsrv_bridge::guild::{Cache, Role};
+use crate::discordsrv_bridge::guild::{Cache, Member, Role};
 
 /// What happens with a message from a chat channel.
 #[derive(Debug, PartialEq, Eq)]
@@ -354,6 +354,61 @@ pub fn minecraft_to_discord(chat: &Chat, filters: &ChatFilters, cache: &Cache, m
     Some(truncate(&text, crate::discordsrv_bridge::console::MAX_MESSAGE))
 }
 
+/// A player's chat message for webhook delivery (`Experiment_WebhookChatMessage*`, DiscordSRV's
+/// `WebhookUtil.deliverMessage`): the webhook's username and content. `member` is the player's
+/// linked Discord member, whose names fill `%discordname%` and `%discordusername%` (empty when
+/// there is none). None when the prefix rule, a game filter or an empty name keeps it out.
+pub fn webhook_message(chat: &Chat, filters: &ChatFilters, cache: &Cache, m: &GameChat, member: Option<&Member>) -> Option<(String, String)> {
+    let message = strip_codes(m.message);
+    if message.starts_with(chat.discord_chat_channel_prefix_required_to_process_message.as_str())
+        == chat.discord_chat_channel_prefix_acts_as_blacklist
+    {
+        return None;
+    }
+    // The game filters see the message first; a message they empty is not sent.
+    let message = filters.game.apply(&message)?;
+    let message = if chat.discord_chat_channel_translate_mentions {
+        translate_mentions(chat, cache, &message)
+    } else {
+        message.replace('@', "@\u{200B}")
+    };
+    let username = strip_codes(m.username);
+    let display = strip_codes(m.display_name);
+    let format = if chat.experiment_webhook_chat_message_format.is_empty() {
+        "%message%"
+    } else {
+        chat.experiment_webhook_chat_message_format.as_str()
+    };
+    // DiscordSRV escapes only `[` here (links); the rest of the message goes out as typed.
+    let content = fill(
+        format,
+        &[("displayname", &display), ("username", &username), ("message", &message.replace('[', "\\["))],
+    );
+    let content = filters.game.apply(&content)?;
+    let name_format = if chat.experiment_webhook_chat_message_username_format.is_empty() {
+        "%displayname%"
+    } else {
+        chat.experiment_webhook_chat_message_username_format.as_str()
+    };
+    let mut name = fill(name_format, &[("displayname", &display), ("username", &username)]);
+    name = filters.game.apply(&name)?;
+    let (discord_name, discord_username) = member.map_or((String::new(), String::new()), |m| {
+        (m.effective_name().to_string(), m.username.clone())
+    });
+    name = name.replace("%discordname%", &discord_name).replace("%discordusername%", &discord_username);
+    if chat.experiment_webhook_chat_message_username_from_discord {
+        if let Some(member) = member {
+            name = member.effective_name().to_string();
+        }
+    }
+    // Discord's webhook names are at most 80 characters.
+    let name: String = name.chars().take(80).collect();
+    if name.trim().is_empty() {
+        return None;
+    }
+    Some((name, content))
+}
+
 /// `@name` in a game message as a Discord mention of the role or member with that name (case
 /// insensitive, not right after a `<`), for the roles and members the bot knows.
 pub fn translate_mentions(chat: &Chat, cache: &Cache, message: &str) -> String {
@@ -620,5 +675,89 @@ mod tests {
     #[test]
     fn allowed_mentions_follow_the_list() {
         assert_eq!(allowed_mentions(&chat()), json!({ "parse": ["users"] }));
+    }
+}
+
+#[cfg(test)]
+mod webhook_tests {
+    use super::*;
+    use crate::discordsrv_bridge::config::{Config, DEFAULT_CONFIG};
+    use crate::discordsrv_bridge::guild::tests::sample;
+
+    fn chat() -> Chat {
+        let mut c = Config::parse(DEFAULT_CONFIG).unwrap().chat;
+        c.channels = vec![("global".into(), "300".into())];
+        c.experiment_webhook_chat_message_delivery = true;
+        c
+    }
+
+    fn game(message: &str) -> GameChat<'_> {
+        GameChat { username: "jeb_", display_name: "Jeb", message, primary_group: "", world: "world", date: "", channel: "global" }
+    }
+
+    fn member() -> Member {
+        Member { username: "jebdiscord".into(), global_name: None, nick: Some("Jeb D".into()), roles: vec![], avatar_url: String::new() }
+    }
+
+    fn pair(name: &str, content: &str) -> Option<(String, String)> {
+        Some((name.to_string(), content.to_string()))
+    }
+
+    #[test]
+    fn the_default_formats_send_the_display_name_and_the_message() {
+        let c = chat();
+        let f = ChatFilters::new(&c).unwrap();
+        assert_eq!(webhook_message(&c, &f, &sample(), &game("hello"), None), pair("Jeb", "hello"));
+    }
+
+    #[test]
+    fn brackets_in_the_message_are_escaped_for_the_link_syntax() {
+        let c = chat();
+        let f = ChatFilters::new(&c).unwrap();
+        assert_eq!(webhook_message(&c, &f, &sample(), &game("see [here]"), None), pair("Jeb", "see \\[here]"));
+    }
+
+    #[test]
+    fn a_game_filter_that_empties_the_message_keeps_it_in_game() {
+        let mut c = chat();
+        c.discord_chat_channel_game_filters = vec![(".*".into(), "".into())];
+        let f = ChatFilters::new(&c).unwrap();
+        assert_eq!(webhook_message(&c, &f, &sample(), &game("anything"), None), None);
+    }
+
+    #[test]
+    fn the_username_can_take_the_linked_discord_names() {
+        let mut c = chat();
+        c.experiment_webhook_chat_message_username_format = "%displayname% (%discordusername%)".into();
+        let f = ChatFilters::new(&c).unwrap();
+        assert_eq!(webhook_message(&c, &f, &sample(), &game("hi"), Some(&member())), pair("Jeb (jebdiscord)", "hi"));
+        assert_eq!(webhook_message(&c, &f, &sample(), &game("hi"), None), pair("Jeb ()", "hi"));
+    }
+
+    #[test]
+    fn username_from_discord_uses_the_nickname_of_the_linked_member() {
+        let mut c = chat();
+        c.experiment_webhook_chat_message_username_from_discord = true;
+        let f = ChatFilters::new(&c).unwrap();
+        assert_eq!(webhook_message(&c, &f, &sample(), &game("hi"), Some(&member())), pair("Jeb D", "hi"));
+        assert_eq!(webhook_message(&c, &f, &sample(), &game("hi"), None), pair("Jeb", "hi"));
+    }
+
+    #[test]
+    fn the_username_is_cut_to_eighty_characters() {
+        let c = chat();
+        let f = ChatFilters::new(&c).unwrap();
+        let long = "a".repeat(100);
+        let g = GameChat { username: "jeb_", display_name: &long, message: "hi", primary_group: "", world: "world", date: "", channel: "global" };
+        let (name, _) = webhook_message(&c, &f, &sample(), &g, None).unwrap();
+        assert_eq!(name.chars().count(), 80);
+    }
+
+    #[test]
+    fn an_empty_username_is_not_sent() {
+        let mut c = chat();
+        c.experiment_webhook_chat_message_username_format = "%discordname%".into();
+        let f = ChatFilters::new(&c).unwrap();
+        assert_eq!(webhook_message(&c, &f, &sample(), &game("hi"), None), None);
     }
 }

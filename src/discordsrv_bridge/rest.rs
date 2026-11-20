@@ -1,7 +1,20 @@
 //! Discord's REST API (v10) through ureq: send a message, set a channel's topic, find the gateway.
+use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde_json::{Value, json};
+
+/// The name DiscordSRV gives its webhooks.
+const WEBHOOK_NAME: &str = "DiscordSRV";
+
+/// A webhook of the bot in one channel. The token is part of the webhook's URL: no `Debug` here, so
+/// it is never printed by accident.
+#[derive(Clone)]
+pub struct Hook {
+    pub id: String,
+    pub token: String,
+}
 
 const USER_AGENT: &str = concat!(
     "DiscordBot (https://github.com/Detimes/horizon-discordsrv, ",
@@ -13,6 +26,8 @@ pub struct Rest {
     agent: ureq::Agent,
     base: String,
     auth: String,
+    /// The webhooks of this run by channel ID (found or made by [`Rest::webhook`]).
+    hooks: Mutex<HashMap<String, Hook>>,
 }
 
 impl Rest {
@@ -21,7 +36,55 @@ impl Rest {
             agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build(),
             base: base.trim_end_matches('/').to_string(),
             auth: format!("Bot {token}"),
+            hooks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The bot's `DiscordSRV` webhook in a channel: one of the channel's webhooks that has this
+    /// name (with its token, which the bot can read), else a new one. Kept for the run.
+    pub fn webhook(&self, channel: &str) -> Result<Hook, String> {
+        if let Some(hook) = self.hooks_lock().get(channel) {
+            return Ok(hook.clone());
+        }
+        let listed = self.call("GET", &format!("/channels/{channel}/webhooks"), None)?;
+        let found = listed.as_array().into_iter().flatten().find(|h| {
+            h.get("name").and_then(Value::as_str) == Some(WEBHOOK_NAME) && h.get("token").and_then(Value::as_str).is_some()
+        });
+        let made = match found {
+            Some(hook) => hook.clone(),
+            None => self.call("POST", &format!("/channels/{channel}/webhooks"), Some(json!({ "name": WEBHOOK_NAME })))?,
+        };
+        let id = made.get("id").and_then(Value::as_str);
+        let token = made.get("token").and_then(Value::as_str);
+        let (Some(id), Some(token)) = (id, token) else {
+            return Err(format!("webhook of channel {channel}: no id or token in the answer"));
+        };
+        let hook = Hook { id: id.to_string(), token: token.to_string() };
+        self.hooks_lock().insert(channel.to_string(), hook.clone());
+        Ok(hook)
+    }
+
+    /// Posts a body (username, avatar_url, content, allowed_mentions) through the channel's webhook.
+    /// A failure forgets the webhook, so the next message finds or makes one again.
+    pub fn execute_webhook(&self, channel: &str, body: &Value) -> Result<(), String> {
+        let hook = self.webhook(channel)?;
+        let path = format!("/webhooks/{}/{}", hook.id, hook.token);
+        match self.call_as("POST", &path, "POST webhook", Some(body.clone())) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                self.hooks_lock().remove(channel);
+                Err(e)
+            }
+        }
+    }
+
+    /// Whether a webhook ID is one this bot made in this run (its own messages are not echoed).
+    pub fn owns_webhook(&self, id: &str) -> bool {
+        self.hooks_lock().values().any(|h| h.id == id)
+    }
+
+    fn hooks_lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Hook>> {
+        self.hooks.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The gateway's websocket URL (`GET /gateway/bot`).
@@ -78,6 +141,12 @@ impl Rest {
     /// One request; a 429 waits its `retry_after` and tries again (three times at most), a 5xx
     /// once after a second.
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+        self.call_as(method, path, path, body)
+    }
+
+    /// [`Rest::call`] with `label` in its error messages instead of the path (a webhook's path
+    /// holds its token).
+    fn call_as(&self, method: &str, path: &str, label: &str, body: Option<Value>) -> Result<Value, String> {
         let url = format!("{}{path}", self.base);
         let mut server_errors = 0;
         for _ in 0..4 {
@@ -107,12 +176,12 @@ impl Rest {
                 }
                 Err(ureq::Error::Status(code, response)) => {
                     let text = response.into_string().unwrap_or_default();
-                    return Err(format!("{method} {path}: HTTP {code} {}", text.chars().take(200).collect::<String>()));
+                    return Err(format!("{method} {label}: HTTP {code} {}", text.chars().take(200).collect::<String>()));
                 }
-                Err(e) => return Err(format!("{method} {path}: {}", transport_error(&e))),
+                Err(e) => return Err(format!("{method} {label}: {}", transport_error(&e))),
             }
         }
-        Err(format!("{method} {path}: still rate limited"))
+        Err(format!("{method} {label}: still rate limited"))
     }
 }
 
