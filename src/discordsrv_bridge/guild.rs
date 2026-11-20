@@ -28,6 +28,8 @@ pub struct Member {
     /// Per guild nickname, as last seen.
     pub nick: Option<String>,
     pub roles: Vec<String>,
+    /// The user's avatar (their own, or Discord's default one): `getEffectiveAvatarUrl`.
+    pub avatar_url: String,
 }
 
 impl Member {
@@ -133,7 +135,16 @@ impl Cache {
         if id.is_empty() {
             return;
         }
+        let avatar = s(user, "avatar");
+        let avatar_url = if avatar.is_empty() {
+            // Discord's default avatars: picked by the user ID (the new username system).
+            let index = id.parse::<u64>().map(|n| (n >> 22) % 6).unwrap_or(0);
+            format!("https://cdn.discordapp.com/embed/avatars/{index}.png")
+        } else {
+            format!("https://cdn.discordapp.com/avatars/{id}/{avatar}.png")
+        };
         let entry = self.members.entry(id).or_default();
+        entry.avatar_url = avatar_url;
         entry.username = s(user, "username");
         entry.global_name = user.get("global_name").and_then(Value::as_str).map(str::to_string);
         if let Some(m) = member {

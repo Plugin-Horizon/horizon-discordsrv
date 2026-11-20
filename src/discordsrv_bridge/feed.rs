@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::console::LogLine;
+use crate::discordsrv_bridge::console::LogLine;
 
 pub struct Feed {
     lines: Mutex<VecDeque<LogLine>>,
@@ -36,6 +36,11 @@ impl Feed {
     /// Every line pushed since the last call, oldest first.
     pub fn drain(&self) -> Vec<LogLine> {
         self.lines.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect()
+    }
+
+    /// A reload starts a reader again: lines are kept from now on.
+    pub fn reopen(&self) {
+        self.closed.store(false, Ordering::Relaxed);
     }
 
     /// Nothing reads the feed (no console channel, or the bridge stopped): drop what it holds

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// The file written when none exists: the bridge stays off until a console channel is set.
-pub const DEFAULT_CONFIG: &str = include_str!("../config.example.toml");
+pub const DEFAULT_CONFIG: &str = include_str!("../../data/discordsrv/config.example.toml");
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
@@ -57,6 +57,15 @@ pub struct Chat {
     /// `link` take their kind of message when present.
     pub channels: Vec<(String, String)>,
     pub discord_invite_link: String,
+    /// `MinecraftMentionSound` (default `true` in DiscordSRV): a Discord message that mentions an
+    /// online player as `@name` plays the note-block pling to them. Missing here: off.
+    pub minecraft_mention_sound: bool,
+    /// `ForcedLanguage`: only English exists in this port; any other value is warned about.
+    pub forced_language: String,
+    /// `Timezone`: `default` (the server's) is the only one applied; any other value is warned about.
+    pub timezone: String,
+    /// `Debug`: the categories of DiscordSRV's `Debug` enum logged all the time (`/discord debugger` adds more).
+    pub debug: Vec<String>,
     /// Avatar URL pattern: `{username}`, `{uuid}`, `{uuid-nodashes}`, `{size}`, `{texture}`.
     /// Empty: [`DEFAULT_AVATAR_URL`].
     pub avatar_url: String,
@@ -82,8 +91,28 @@ pub struct Chat {
     pub discord_chat_channel_roles_allowed_to_use_color_codes_in_chat: Vec<String>,
     pub discord_chat_channel_broadcast_discord_messages_to_console: bool,
     pub discord_chat_channel_require_linked_account: bool,
+    /// `Require linked account to play` (linking.yml): logins need a linked account. Its
+    /// membership, subscriber, whitelist and ban checks are not ported (see the README).
+    #[serde(rename = "Require linked account to play")]
+    pub require_linked_account_to_play: RequireLinked,
     pub discord_chat_channel_block_bots: bool,
     pub discord_chat_channel_block_webhooks: bool,
+    /// `Experiment_WebhookChatMessageDelivery` (default false): a player's chat goes out through the
+    /// bot's webhook in the chat channel (named `DiscordSRV`) instead of a message of the bot.
+    #[serde(rename = "Experiment_WebhookChatMessageDelivery")]
+    pub experiment_webhook_chat_message_delivery: bool,
+    /// `Experiment_WebhookChatMessageUsernameFormat`; empty: `%displayname%`.
+    #[serde(rename = "Experiment_WebhookChatMessageUsernameFormat")]
+    pub experiment_webhook_chat_message_username_format: String,
+    /// `Experiment_WebhookChatMessageFormat`; empty: `%message%`.
+    #[serde(rename = "Experiment_WebhookChatMessageFormat")]
+    pub experiment_webhook_chat_message_format: String,
+    /// `Experiment_WebhookChatMessageUsernameFromDiscord`: the linked Discord member's name.
+    #[serde(rename = "Experiment_WebhookChatMessageUsernameFromDiscord")]
+    pub experiment_webhook_chat_message_username_from_discord: bool,
+    /// `Experiment_WebhookChatMessageAvatarFromDiscord`: the linked Discord member's avatar.
+    #[serde(rename = "Experiment_WebhookChatMessageAvatarFromDiscord")]
+    pub experiment_webhook_chat_message_avatar_from_discord: bool,
     pub discord_chat_channel_blocked_ids: Vec<String>,
     pub discord_chat_channel_blocked_roles_as_whitelist: bool,
     pub discord_chat_channel_blocked_roles_ids: Vec<String>,
@@ -171,6 +200,30 @@ pub struct Chat {
     pub discord_linked_account_check_failed: String,
 }
 
+/// The `Require linked account to play` section of linking.yml.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RequireLinked {
+    #[serde(rename = "Enabled")]
+    pub enabled: bool,
+    /// Minecraft names let in without a link.
+    #[serde(rename = "Bypass names")]
+    pub bypass_names: Vec<String>,
+    /// Kick text of a player without a link (`{BOT}`, `{CODE}`, `{INVITE}`, `&` codes); empty: the default.
+    #[serde(rename = "Not linked message")]
+    pub not_linked_message: String,
+    #[serde(rename = "Messages")]
+    pub messages: RequireLinkedMessages,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RequireLinkedMessages {
+    /// Kick text while the bridge has not connected to Discord yet; empty: the default.
+    #[serde(rename = "DiscordSRV still starting")]
+    pub still_starting: String,
+}
+
 /// One `ChannelUpdater` entry: a channel whose name shows server information.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
@@ -182,14 +235,25 @@ pub struct ChannelUpdater {
     pub update_interval: u64,
 }
 
-/// A notification of messages.yml (`MinecraftPlayerJoinMessage` and its siblings). Webhook
-/// delivery is not ported (see the README).
+/// A notification of messages.yml (`MinecraftPlayerJoinMessage` and its siblings).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct MessageTemplate {
     pub enabled: bool,
     pub content: String,
     pub embed: EmbedTemplate,
+    pub webhook: NoticeWebhook,
+}
+
+/// The `Webhook` section of a notification: sent under this name and avatar through a webhook
+/// (`Enable` is DiscordSRV's other spelling of `Enabled`). Empty name and avatar: the bot's.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct NoticeWebhook {
+    pub enabled: bool,
+    pub enable: bool,
+    pub name: String,
+    pub avatar_url: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -356,6 +420,31 @@ mod tests {
         assert_eq!(c.discord_console_channel_prefix, "[{date} {level}{name}] ");
         assert_eq!(c.channel_topic_updater_rate_in_minutes, 10);
         assert_eq!(c.discord_game_status, vec!["playing Minecraft".to_string()]);
+    }
+
+    #[test]
+    fn the_webhook_keys_read_their_original_names() {
+        let text = format!("{DEFAULT_CONFIG}\n[MinecraftPlayerJoinMessage.Webhook]\nEnable = true\nName = \"Server\"\n");
+        let c = Config::parse(&text).unwrap().chat;
+        assert!(!c.experiment_webhook_chat_message_delivery);
+        assert_eq!(c.experiment_webhook_chat_message_username_format, "%displayname%");
+        assert_eq!(c.experiment_webhook_chat_message_format, "%message%");
+        assert!(!c.experiment_webhook_chat_message_avatar_from_discord);
+        assert!(c.minecraft_player_join_message.webhook.enable);
+        assert!(!c.minecraft_player_join_message.webhook.enabled);
+        assert_eq!(c.minecraft_player_join_message.webhook.name, "Server");
+    }
+
+    #[test]
+    fn the_require_linked_section_reads_its_original_names() {
+        let c = Config::parse(DEFAULT_CONFIG).unwrap().chat;
+        assert!(!c.require_linked_account_to_play.enabled);
+        assert!(c.require_linked_account_to_play.bypass_names.is_empty());
+        let text = DEFAULT_CONFIG.replace("Enabled = false\n\"Bypass names\" = []", "Enabled = true\n\"Bypass names\" = [\"Scarsz\"]");
+        assert_ne!(text, DEFAULT_CONFIG);
+        let on = Config::parse(&text).unwrap().chat.require_linked_account_to_play;
+        assert!(on.enabled);
+        assert_eq!(on.bypass_names, vec!["Scarsz".to_string()]);
     }
 
     #[test]

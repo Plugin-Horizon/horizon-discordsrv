@@ -55,6 +55,14 @@ ChannelTopicUpdaterConsoleChannelTopicAtServerShutdownFormat = "Server is offlin
 # channel, and none of the chat features below do anything.
 Channels = []
 DiscordInviteLink = "https://discord.gg/changethisintheconfig.yml"
+# Play the note-block pling to an online player a Discord message mentions as @name.
+MinecraftMentionSound = true
+# Only English exists in this port; any other value is warned about at the start.
+ForcedLanguage = "none"
+# Only "default" (the server's time zone) is applied; any other value is warned about.
+Timezone = "default"
+# Debug categories always logged (DiscordSRV's Debug enum words, see /discord debugger).
+Debug = []
 # Empty uses https://crafatar.com/avatars/{uuid-nodashes}?size={size}&overlay
 AvatarUrl = ""
 # %date% in chat messages and notifications (Java SimpleDateFormat letters).
@@ -75,6 +83,13 @@ DiscordChatChannelBroadcastDiscordMessagesToConsole = true
 DiscordChatChannelRequireLinkedAccount = false
 DiscordChatChannelBlockBots = false
 DiscordChatChannelBlockWebhooks = true
+# Webhook delivery (DiscordSRV's Experiment_ keys). Off: messages from the bot. On: a webhook named
+# DiscordSRV per chat channel, made by the bot (it needs Manage Webhooks). Keep block-webhooks on.
+Experiment_WebhookChatMessageDelivery = false
+Experiment_WebhookChatMessageUsernameFormat = "%displayname%"
+Experiment_WebhookChatMessageFormat = "%message%"
+Experiment_WebhookChatMessageUsernameFromDiscord = false
+Experiment_WebhookChatMessageAvatarFromDiscord = false
 DiscordChatChannelBlockedIds = []
 DiscordChatChannelBlockedRolesAsWhitelist = false
 DiscordChatChannelBlockedRolesIds = []
@@ -217,3 +232,14 @@ Enabled = true
 Color = "#ffd700"
 Author = { ImageUrl = "%embedavatarurl%", Name = "%username% has made the advancement %achievement%!", Url = "" }
 Timestamp = false
+
+# Require linked account to play (linking.yml). Off: anyone may log in. On: an unlinked player is
+# refused with the kick text; {BOT}, {CODE} and {INVITE} are filled in. Empty texts use the defaults.
+# The membership, subscriber role, whitelist and ban checks of DiscordSRV are not ported.
+["Require linked account to play"]
+Enabled = false
+"Bypass names" = []
+"Not linked message" = ""
+
+["Require linked account to play".Messages]
+"DiscordSRV still starting" = ""

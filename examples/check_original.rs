@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use discordsrv_bridge::original;
+use mod_discordsrv::discordsrv_bridge::original;
 
 fn main() {
     let paths: Vec<PathBuf> = std::env::args().skip(1).map(PathBuf::from).collect();

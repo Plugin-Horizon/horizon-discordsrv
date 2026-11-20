@@ -3,8 +3,8 @@
 use chrono::{TimeZone, Utc};
 use serde_json::{Map, Value, json};
 
-use crate::config::{MessageTemplate, Timestamp};
-use crate::format::{fill, truncate};
+use crate::discordsrv_bridge::config::{MessageTemplate, Timestamp};
+use crate::discordsrv_bridge::format::{fill, truncate};
 
 /// Discord's limits: author name, title, description, field name, field value, footer.
 const AUTHOR: usize = 256;
@@ -33,7 +33,7 @@ pub fn render(template: &MessageTemplate, pairs: &[(&str, &str)], now: i64) -> O
     let mut body = Map::new();
     let content = f(&template.content);
     if !content.is_empty() {
-        body.insert("content".into(), Value::String(truncate(&content, crate::console::MAX_MESSAGE)));
+        body.insert("content".into(), Value::String(truncate(&content, crate::discordsrv_bridge::console::MAX_MESSAGE)));
     }
     let e = &template.embed;
     if e.enabled {
@@ -126,8 +126,8 @@ fn field(spec: &str) -> Option<Value> {
 
 /// The avatar URL pattern of `AvatarUrl` for a player.
 pub fn avatar_url(pattern: &str, username: &str, uuid: u128, size: u32) -> String {
-    let dashed = crate::server::uuid_string(uuid);
-    let pattern = if pattern.trim().is_empty() { crate::config::DEFAULT_AVATAR_URL } else { pattern };
+    let dashed = crate::discordsrv_bridge::server::uuid_string(uuid);
+    let pattern = if pattern.trim().is_empty() { crate::discordsrv_bridge::config::DEFAULT_AVATAR_URL } else { pattern };
     pattern
         .replace("{username}", username)
         .replace("{uuid-nodashes}", &dashed.replace('-', ""))
@@ -140,7 +140,7 @@ pub fn avatar_url(pattern: &str, username: &str, uuid: u128, size: u32) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, DEFAULT_CONFIG};
+    use crate::discordsrv_bridge::config::{Config, DEFAULT_CONFIG};
 
     #[test]
     fn the_default_join_message_is_a_green_author_embed() {

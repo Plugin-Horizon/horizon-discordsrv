@@ -8,12 +8,13 @@ use std::time::{Duration, Instant};
 use chrono::{Local, Utc};
 use serde_json::{Value, json};
 
-use crate::chat::{self, FromDiscord, GameChat};
-use crate::console::java_date_format;
-use crate::format::{escape_markdown, fill, strip_codes, translate_ampersand, truncate};
-use crate::linking::CodeResult;
-use crate::server::{Player, uuid_string};
-use crate::{Shared, State, embed};
+use crate::discordsrv_bridge::chat::{self, FromDiscord, GameChat};
+use crate::discordsrv_bridge::console::java_date_format;
+use crate::discordsrv_bridge::debugger;
+use crate::discordsrv_bridge::format::{escape_markdown, fill, strip_codes, translate_ampersand, truncate};
+use crate::discordsrv_bridge::linking::CodeResult;
+use crate::discordsrv_bridge::server::{Player, uuid_string};
+use crate::discordsrv_bridge::{Shared, State, embed};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Notice {
@@ -74,7 +75,7 @@ impl Shared {
         let console = self.config.discord_console_channel_id.trim();
         if !console.is_empty() && channel == console {
             drop(st);
-            if let Some(m) = crate::gateway::console_message(d, console) {
+            if let Some(m) = crate::discordsrv_bridge::gateway::console_message(d, console) {
                 self.console_command(m);
             }
             return;
@@ -94,7 +95,9 @@ impl Shared {
             return;
         }
         let webhook = d.get("webhook_id").is_some_and(|w| !w.is_null());
-        if webhook && c.discord_chat_channel_block_webhooks {
+        // The bot's own webhook (webhook delivery) is never echoed back, whatever the block setting.
+        let own = webhook && self.rest.owns_webhook(d["webhook_id"].as_str().unwrap_or_default());
+        if webhook && (c.discord_chat_channel_block_webhooks || own) {
             return;
         }
         // The link channel takes codes from people (and nothing else), whatever UsePM says.
@@ -116,7 +119,7 @@ impl Shared {
         if let Some((_, answer)) = canned {
             let text = strip_codes(&self.server_text(answer, &st.players));
             if !text.trim().is_empty() {
-                let body = json!({ "content": truncate(&text, crate::console::MAX_MESSAGE), "allowed_mentions": chat::allowed_mentions(c) });
+                let body = json!({ "content": truncate(&text, crate::discordsrv_bridge::console::MAX_MESSAGE), "allowed_mentions": chat::allowed_mentions(c) });
                 self.push_job(Job::Post { channel: channel.to_string(), body, expire: None });
             }
             return;
@@ -156,6 +159,7 @@ impl Shared {
         match outcome {
             // The server logs every broadcast, whatever BroadcastDiscordMessagesToConsole says (GAPS.md).
             FromDiscord::Broadcast { lines, truncated } => {
+                debugger::log("DISCORD_TO_MINECRAFT", &self.config.chat.debug, &format!("Broadcasting {} line(s) from channel {channel} to the game", lines.len()));
                 self.to_game.lock().unwrap_or_else(|e| e.into_inner()).broadcasts.extend(lines);
                 if truncated {
                     self.push_job(Job::React { channel, message: message_id, emoji: vec!["\u{1F4AC}", "\u{2757}"] });
@@ -253,7 +257,7 @@ impl Shared {
     /// messages as fit, deleted after `DiscordChatChannelConsoleCommandExpiration` seconds.
     pub(crate) fn chat_console_answer(&self, channel: &str, output: &[String]) {
         let c = &self.config.chat;
-        let lines: Vec<String> = output.iter().flat_map(|l| l.split('\n')).map(crate::console::strip_colors).collect();
+        let lines: Vec<String> = output.iter().flat_map(|l| l.split('\n')).map(crate::discordsrv_bridge::console::strip_colors).collect();
         let expire = (c.discord_chat_channel_console_command_expiration > 0)
             .then(|| (Duration::from_secs(c.discord_chat_channel_console_command_expiration), None));
         let mut body = String::new();
@@ -296,12 +300,12 @@ impl Shared {
             Ok(CodeResult::Invalid) => fill(&c.invalid_code, &[("code", &digits), ("mention", &mention)]),
             Ok(CodeResult::Unknown) => fill(&c.unknown_code, &[("code", &digits), ("mention", &mention)]),
             Ok(CodeResult::AlreadyLinked(uuid)) => {
-                let name = crate::commands::known_name(st, &self.server, uuid).unwrap_or_else(|| "<Unknown>".to_string());
+                let name = crate::discordsrv_bridge::commands::known_name(st, &self.server, uuid).unwrap_or_else(|| "<Unknown>".to_string());
                 fill(&c.discord_account_already_linked, &[("uuid", &uuid_string(uuid)), ("username", &name), ("mention", &mention)])
             }
             Ok(CodeResult::Linked { uuid, name, replaced }) => {
                 if let Some(old) = replaced {
-                    let old_name = crate::commands::known_name(st, &self.server, old).unwrap_or_else(|| uuid_string(old));
+                    let old_name = crate::discordsrv_bridge::commands::known_name(st, &self.server, old).unwrap_or_else(|| uuid_string(old));
                     self.push_job(Job::Unlinked { discord: author.clone(), uuid: old, name: old_name });
                 }
                 let line = fill(&c.minecraft_account_linked, &[("username", &username), ("id", &author)]);
@@ -382,7 +386,7 @@ impl Shared {
                 ("timestamp", &Utc::now().timestamp().to_string()),
             ],
         );
-        crate::topic_text(&filled, tps, &self.version)
+        crate::discordsrv_bridge::topic_text(&filled, tps, &self.version)
     }
 
     fn post_logged(&self, channel: &str, body: &Value, what: &str) -> Option<String> {
@@ -447,13 +451,30 @@ impl Shared {
                 ];
                 if let Some(mut body) = embed::render(template, &pairs, Utc::now().timestamp()) {
                     body["allowed_mentions"] = json!({ "parse": [] });
-                    self.post_logged(channel, &body, "notification");
+                    let hook = &template.webhook;
+                    if hook.enabled || hook.enable {
+                        // The notification goes out under the webhook's name and avatar (`%botname%`, `%botavatarurl%` by default).
+                        let name_pattern = if hook.name.trim().is_empty() { "%botname%" } else { hook.name.as_str() };
+                        let avatar_pattern = if hook.avatar_url.trim().is_empty() { "%botavatarurl%" } else { hook.avatar_url.as_str() };
+                        let name: String = fill(name_pattern, &pairs).trim().chars().take(80).collect();
+                        body["username"] = json!(name);
+                        body["avatar_url"] = json!(fill(avatar_pattern, &pairs).trim());
+                        if let Err(e) = self.rest.execute_webhook(channel, &body) {
+                            log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't send the notification as a webhook: {e}");
+                        }
+                    } else {
+                        self.post_logged(channel, &body, "notification");
+                    }
                 }
             }
             Job::GameChat { player, message } => {
                 let Some(channel) = c.channel_for("global") else { return };
                 let world = self.server.world_name(&player.dimension);
                 let date = self.date_now();
+                if c.experiment_webhook_chat_message_delivery {
+                    self.webhook_chat(channel, &player, &message, &world, &date);
+                    return;
+                }
                 let content = {
                     let st = self.lock_state();
                     let m = GameChat {
@@ -506,6 +527,44 @@ impl Shared {
                 let discord_name = self.lock_state().cache.members.get(&discord).map(|m| m.username.clone()).unwrap_or_default();
                 self.link_commands(&c.minecraft_discord_account_unlinked_console_commands, &discord, &discord_name, uuid, &name);
             }
+        }
+    }
+
+    /// A player's chat through the bot's webhook in the channel (`Experiment_WebhookChatMessageDelivery`).
+    /// The linked Discord member, when there is one, names the message and gives its avatar if asked.
+    fn webhook_chat(&self, channel: &str, player: &Player, message: &str, world: &str, date: &str) {
+        let c = &self.config.chat;
+        let built = {
+            let st = self.lock_state();
+            let member = st.accounts.discord_of(player.uuid).and_then(|id| st.cache.members.get(id)).cloned();
+            let game = GameChat {
+                username: &player.name,
+                display_name: &player.name,
+                message,
+                // No permissions/groups API between mods (GAPS.md).
+                primary_group: "",
+                world,
+                date,
+                channel: "global",
+            };
+            chat::webhook_message(c, &self.chat_filters, &st.cache, &game, member.as_ref()).map(|(name, content)| {
+                let avatar = member
+                    .as_ref()
+                    .filter(|_| c.experiment_webhook_chat_message_avatar_from_discord)
+                    .map(|m| m.avatar_url.clone())
+                    .unwrap_or_else(|| embed::avatar_url(&c.avatar_url, &player.name, player.uuid, 128));
+                (name, content, avatar)
+            })
+        };
+        let Some((name, content, avatar)) = built else { return };
+        let body = json!({
+            "username": name,
+            "avatar_url": avatar,
+            "content": content,
+            "allowed_mentions": chat::allowed_mentions(c),
+        });
+        if let Err(e) = self.rest.execute_webhook(channel, &body) {
+            log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't send the chat message as a webhook: {e}");
         }
     }
 
@@ -564,7 +623,7 @@ impl Shared {
 pub fn chat_loop(shared: &Shared) {
     let c = &shared.config.chat;
     let main = c.channel_for("global").map(str::to_string);
-    let mut startup_sent = false;
+    let mut startup_sent = shared.suppress_startup.load(Ordering::Relaxed);
     let mut expiring: Vec<(Instant, String, String)> = Vec::new();
     let topic_every = Duration::from_secs(shared.config.channel_topic_updater_rate_in_minutes.max(1) * 60);
     let mut next_topic = Instant::now() + Duration::from_secs(5);
@@ -624,6 +683,9 @@ pub fn chat_loop(shared: &Shared) {
 
         if stopping {
             shared.drain_jobs(&mut expiring);
+            if shared.quiet_stop.load(Ordering::Relaxed) {
+                return;
+            }
             let text = c.discord_chat_channel_server_shutdown_message.trim();
             if let Some(channel) = c.channel_for("status").filter(|_| !text.is_empty()) {
                 shared.post_logged(channel, &no_mentions(text), "shutdown message");
@@ -670,7 +732,7 @@ fn watchdog(shared: &Shared, timeout: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, DEFAULT_CONFIG};
+    use crate::discordsrv_bridge::config::{Config, DEFAULT_CONFIG};
 
     fn bridge(name: &str) -> (Shared, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("hdsrv-relay-{name}-{}", std::process::id()));
@@ -835,7 +897,7 @@ mod tests {
         assert_eq!(lines, vec!["§bJoin us on Discord at https://discord.gg/changethisintheconfig.yml§b. For command help, do \"/discord ?\"".to_string()]);
         assert_eq!(sorted_lines(&sh, 1, "bogus", &player), vec!["§bThat command doesn't exist!".to_string()]);
         // Help lists what the player may run, and `help <command>` one entry (colours are random).
-        let strip = |v: Vec<String>| v.iter().map(|l| crate::format::strip_codes(l)).collect::<Vec<_>>();
+        let strip = |v: Vec<String>| v.iter().map(|l| crate::discordsrv_bridge::format::strip_codes(l)).collect::<Vec<_>>();
         let help = strip(sorted_lines(&sh, 1, "?", &player));
         assert_eq!(help[0], "================[ DiscordSRV ]================");
         assert!(help.contains(&"- /discord ?/help".to_string()));
@@ -864,6 +926,24 @@ mod tests {
         // The nodes of `others` are asked separately: a player with `link` only.
         let some = |node: &str, d: u8| d == 0 || node == "discordsrv.link";
         assert_eq!(sorted_lines(&sh, 1, "linked someone", &some), vec![no.clone()]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_console_cannot_use_the_own_account_forms() {
+        let (sh, dir) = bridge("j");
+        let c = crate::discordsrv_bridge::commands::CONSOLE;
+        assert_eq!(sorted_lines(&sh, c, "link", &op), vec!["§cOnly players can execute this command.".to_string()]);
+        assert_eq!(
+            sorted_lines(&sh, c, "unlink", &op),
+            vec!["§cNo player specified. It can be a player UUID, player name, or Discord ID.".to_string()]
+        );
+        assert_eq!(
+            crate::discordsrv_bridge::commands::permission_of("CLEARLINKED"),
+            Some(("discordsrv.unlink", 2))
+        );
+        assert_eq!(crate::discordsrv_bridge::commands::permission_of("?"), Some(("discordsrv.help", 0)));
+        assert_eq!(crate::discordsrv_bridge::commands::permission_of("nothing"), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

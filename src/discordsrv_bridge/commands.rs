@@ -4,14 +4,56 @@
 //! Every reply is a list of `&`-coded lines; the glue turns them into chat lines.
 use serde_json::json;
 
-use crate::chat;
-use crate::format::{fill, translate_ampersand, truncate};
-use crate::relay::Job;
-use crate::server::{ServerInfo, parse_uuid, uuid_string};
-use crate::{Shared, State};
+use crate::discordsrv_bridge::chat;
+use crate::discordsrv_bridge::debugger;
+use crate::discordsrv_bridge::format::{fill, translate_ampersand, truncate};
+use crate::discordsrv_bridge::relay::Job;
+use crate::discordsrv_bridge::server::{ServerInfo, parse_uuid, uuid_string};
+use crate::discordsrv_bridge::{Shared, State};
 
 /// The operator level of the `discordsrv.*` nodes that default to `op`.
 pub const OP_LEVEL: u8 = 2;
+
+/// The sender id of the console (and RCON, command blocks): no player has it. DiscordSRV's
+/// commands take a `CommandSender`, so they work from there too.
+pub const CONSOLE: u128 = 0;
+
+/// `RESYNC_WHEN_GROUP_SYNC_DISABLED`: group and role synchronisation is not ported, so it is always off.
+const RESYNC_DISABLED: &str =
+    "&cGroup synchonization requires valid GroupRoleSynchronizationGroupsAndRolesToSync entries in synchronization.yml";
+
+/// `CommandReload`: the config is read again and the bridge restarts with it.
+fn reload_lines() -> Vec<String> {
+    match crate::discordsrv_bridge::reload() {
+        Ok(true) => vec!["&bThe DiscordSRV config & lang have been reloaded.".to_string()],
+        Ok(false) => vec![
+            "&bThe DiscordSRV config & lang have been reloaded.".to_string(),
+            "&cDiscordSRV is switched off with the new config (see the server log).".to_string(),
+        ],
+        Err(e) => vec![format!("&c{e}")],
+    }
+}
+
+/// `/discord` while the bridge is off: `reload` (which may switch it on) and `debugger` still work, as
+/// they do in DiscordSRV with a failed connection; any other sub-command is the glue's "not connected".
+pub(crate) fn off_command(uuid: u128, args: &str, has: &dyn Fn(&str, u8) -> bool) -> Option<Vec<String>> {
+    let words: Vec<&str> = args.split(' ').filter(|w| !w.is_empty()).collect();
+    let (sub, rest) = words.split_first()?;
+    let command = find(&sub.to_ascii_lowercase())?;
+    if !matches!(command.names[0], "reload" | "debugger") {
+        return None;
+    }
+    let lines = if !has(command.permission, OP_LEVEL) {
+        vec!["&cYou do not have permission to perform this command.".to_string()]
+    } else if command.names[0] == "reload" {
+        reload_lines()
+    } else {
+        let facts = vec!["bridge: off (no token or no channel)".to_string()];
+        let dir = std::env::current_dir().unwrap_or_default().join("config").join("discordsrv");
+        debugger::run(rest, uuid == CONSOLE, &dir, &facts)
+    };
+    Some(lines.iter().map(|l| translate_ampersand(l)).collect())
+}
 
 const LINKING_ERROR: &str = "&cCurrently unable to link accounts due to an internal error. Contact your server administration team.";
 
@@ -98,6 +140,12 @@ const HELP_COLOURS: [char; 11] = ['2', '3', '4', '5', '6', '9', 'a', 'b', 'c', '
 
 fn find(word: &str) -> Option<&'static Command> {
     COMMANDS.iter().find(|c| c.names.iter().any(|n| *n == word))
+}
+
+/// The permission node and default operator level (0 or `OP_LEVEL`) of the sub-command `word`
+/// (any of its names, any case), None for a word that is no sub-command.
+pub(crate) fn permission_of(word: &str) -> Option<(&'static str, u8)> {
+    find(&word.to_ascii_lowercase()).map(|c| (c.permission, if c.op { OP_LEVEL } else { 0 }))
 }
 
 fn random_below(n: usize) -> usize {
@@ -228,16 +276,16 @@ impl Shared {
         }
         let lines = match command.names[0] {
             "broadcast" => self.cmd_broadcast(rest),
-            "debugger" => vec!["&cThe debugger is not part of this port.".to_string()],
+            "debugger" => {
+                let facts = self.debug_facts();
+                debugger::run(rest, uuid == CONSOLE, &self.usage_log_dir, &facts)
+            }
             "?" => help(has, rest, &c.unknown_command_message),
             "language" => cmd_language(rest),
             "link" => self.cmd_link(uuid, name, rest, has),
             "linked" => self.cmd_linked(uuid, rest, has),
-            "reload" => vec!["&cDiscordSRV cannot reload its config yet: restart the server to apply changes.".to_string()],
-            "resync" => vec![
-                "&cGroup synchonization requires valid GroupRoleSynchronizationGroupsAndRolesToSync entries in synchronization.yml"
-                    .to_string(),
-            ],
+            "reload" => reload_lines(),
+            "resync" => vec![RESYNC_DISABLED.to_string()],
             _ => self.cmd_unlink(uuid, name, rest, has),
         };
         lines.iter().map(|l| translate_ampersand(l)).collect()
@@ -272,6 +320,9 @@ impl Shared {
             self.push_job(Job::Linked { discord_name: tag.clone(), discord, uuid: target, name: player.clone() });
             return vec![format!("&aLinked together &6{player}&a and &6{tag}")];
         }
+        if uuid == CONSOLE {
+            return vec!["&cOnly players can execute this command.".to_string()];
+        }
         // The player's earlier codes stop working, so no one can collect several rewards.
         st.accounts.drop_codes(uuid);
         if st.accounts.discord_of(uuid).is_some() {
@@ -286,6 +337,9 @@ impl Shared {
     fn cmd_linked(&self, uuid: u128, args: &[&str], has: &dyn Fn(&str, u8) -> bool) -> Vec<String> {
         let c = &self.config.chat;
         let st = self.lock_state();
+        if args.is_empty() && uuid == CONSOLE {
+            return vec![fill(&c.minecraft_nobody_found, &[("target", "CONSOLE")])];
+        }
         if args.is_empty() {
             return vec![match st.accounts.discord_of(uuid) {
                 Some(id) => {
@@ -348,6 +402,9 @@ impl Shared {
     fn cmd_unlink(&self, uuid: u128, name: &str, args: &[&str], has: &dyn Fn(&str, u8) -> bool) -> Vec<String> {
         let c = &self.config.chat;
         let mut st = self.lock_state();
+        if args.is_empty() && uuid == CONSOLE {
+            return vec!["&cNo player specified. It can be a player UUID, player name, or Discord ID.".to_string()];
+        }
         if args.is_empty() {
             let Some(id) = st.accounts.discord_of(uuid).map(str::to_string) else {
                 return vec![c.minecraft_no_linked_account.clone()];
@@ -434,6 +491,20 @@ impl Shared {
         vec![fill(&c.minecraft_nobody_found, &[("target", &joined)])]
     }
 
+    /// The lines of a debug report: what is on, no IDs, no tokens, no log lines.
+    fn debug_facts(&self) -> Vec<String> {
+        let c = &self.config;
+        let st = self.lock_state();
+        vec![
+            format!("server version: {}", self.version),
+            format!("console channel: {}", if c.discord_console_channel_id.trim().is_empty() { "off" } else { "on" }),
+            format!("chat channels: {}", c.chat.channels.len()),
+            format!("gateway ready: {}", self.ready.load(std::sync::atomic::Ordering::Relaxed)),
+            format!("players online: {}", st.players.len()),
+            format!("config Debug categories: {}", c.chat.debug.join(", ")),
+        ]
+    }
+
     /// Unlinks a player and queues the role and console commands that go with it.
     fn unlink_player(&self, st: &mut State, uuid: u128, name: Option<String>) {
         match st.accounts.unlink(uuid) {
@@ -468,7 +539,7 @@ impl Shared {
         if let Some(channel) = target
             && !text.trim().is_empty()
         {
-            let content = truncate(&text, crate::console::MAX_MESSAGE);
+            let content = truncate(&text, crate::discordsrv_bridge::console::MAX_MESSAGE);
             self.push_job(Job::Post { channel, body: json!({ "content": content, "allowed_mentions": chat::allowed_mentions(c) }), expire: None });
         }
         Vec::new()
