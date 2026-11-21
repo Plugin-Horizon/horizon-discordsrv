@@ -65,3 +65,7 @@ Listeners
 - [n/a] ModernPlayerChatListener (Paper AsyncChatEvent; server_chat is used), DiscordDisconnectListener (logs only)
 Features
 - [ ] voice.yml, alerts.yml, group/nickname/ban synchronisation, linking membership/subscriber/whitelist/ban checks, "Kicked for unlinking"
+
+## Round 100b (for coreconsole)
+- `Preprocess::Refuse` posts its reply to the console channel at once (a `Job::Post`), not with the next log batch.
+- `add_console_preprocessor(f) -> PreprocessorHandle` and `remove_console_preprocessor(handle)`: several preprocessors chain in order, the first `Refuse` ends it; `set_console_preprocessor` still replaces all. Test `several_preprocessors_chain_and_one_can_be_removed`.

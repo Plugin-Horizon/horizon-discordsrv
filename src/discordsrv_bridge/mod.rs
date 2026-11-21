@@ -140,15 +140,40 @@ pub enum Preprocess {
 /// `f(author_id, command)`, see [`set_console_preprocessor`].
 pub type Preprocessor = Box<dyn Fn(&str, &str) -> Preprocess + Send + Sync>;
 
-static PREPROCESSOR: Mutex<Option<Preprocessor>> = Mutex::new(None);
+/// The registered preprocessors with their handle ids, in registration order.
+static PREPROCESSORS: Mutex<Vec<(u64, std::sync::Arc<Preprocessor>)>> = Mutex::new(Vec::new());
+static NEXT_PREPROCESSOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Handle of one preprocessor, for [`remove_console_preprocessor`] (DiscordSRV's `api.unsubscribe`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreprocessorHandle(u64);
 
 /// Lets another mod look at each console channel message before it runs (DiscordSRV's console
 /// command pre-process event): `f(author_id, command)` gets the author's Discord user ID and the
 /// command without its leading slash, after the bot check and before the command list, so a
-/// command it returns must still pass the list. One preprocessor; a later call replaces it. It
-/// runs on the bridge's gateway thread and must not call back into this function.
+/// command it returns must still pass the list. This call replaces every earlier preprocessor
+/// with `f`; use [`add_console_preprocessor`] to keep the others. It runs on the bridge's gateway
+/// thread and must not call back into this function.
 pub fn set_console_preprocessor(f: Preprocessor) {
-    *PREPROCESSOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
+    let mut all = PREPROCESSORS.lock().unwrap_or_else(|e| e.into_inner());
+    all.clear();
+    all.push((NEXT_PREPROCESSOR.fetch_add(1, Ordering::Relaxed), std::sync::Arc::new(f)));
+}
+
+/// Adds a preprocessor after the others (DiscordSRV `api.subscribe`): they run in order, each one
+/// gets the command the one before returned, and the first `Refuse` ends the chain.
+pub fn add_console_preprocessor(f: Preprocessor) -> PreprocessorHandle {
+    let id = NEXT_PREPROCESSOR.fetch_add(1, Ordering::Relaxed);
+    PREPROCESSORS.lock().unwrap_or_else(|e| e.into_inner()).push((id, std::sync::Arc::new(f)));
+    PreprocessorHandle(id)
+}
+
+/// Removes one preprocessor (DiscordSRV `api.unsubscribe`, at the owner's stop). False when it was gone.
+pub fn remove_console_preprocessor(handle: PreprocessorHandle) -> bool {
+    let mut all = PREPROCESSORS.lock().unwrap_or_else(|e| e.into_inner());
+    let before = all.len();
+    all.retain(|(id, _)| *id != handle.0);
+    all.len() != before
 }
 
 /// A console channel command ran (`native_run_command_captured`): its answer goes back to the
@@ -646,22 +671,29 @@ impl Shared {
 
     /// A message in the console channel, through the preprocessor another mod set.
     fn console_command(&self, m: gateway::ChannelMessage) {
-        let pre = PREPROCESSOR.lock().unwrap_or_else(|e| e.into_inner());
-        self.console_command_with(m, pre.as_ref());
+        let list: Vec<std::sync::Arc<Preprocessor>> =
+            PREPROCESSORS.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, f)| f.clone()).collect();
+        let refs: Vec<&Preprocessor> = list.iter().map(|f| &**f).collect();
+        self.console_command_with(m, &refs);
     }
 
     /// A message in the console channel: queued for the server thread when the preprocessor and
     /// the config let it run and the usage log took it.
-    fn console_command_with(&self, m: gateway::ChannelMessage, pre: Option<&Preprocessor>) {
+    fn console_command_with(&self, m: gateway::ChannelMessage, pre: &[&Preprocessor]) {
         if m.bot && self.config.discord_console_channel_block_bots {
             return;
         }
         let mut command = m.content.trim().trim_start_matches('/').to_string();
-        if let Some(f) = pre {
+        for f in pre {
             match f(&m.author_id, &command) {
                 Preprocess::Run(c) => command = c.trim().trim_start_matches('/').to_string(),
                 Preprocess::Refuse { reply } => {
-                    self.reply(vec![reply]);
+                    // Posted at once, as `channel.sendMessage(reply).queue()`, not with the next log batch.
+                    self.push_job(relay::Job::Post {
+                        channel: self.config.discord_console_channel_id.clone(),
+                        body: serde_json::json!({ "content": reply, "allowed_mentions": { "parse": [] } }),
+                        expire: None,
+                    });
                     return;
                 }
             }
@@ -844,16 +876,48 @@ mod tests {
             "sneaky" => Preprocess::Run("/stop".into()),
             other => Preprocess::Run(other.to_string()),
         });
-        sh.console_command_with(message("11", "/op me"), Some(&pre));
-        sh.console_command_with(message("12", "op me"), Some(&pre));
-        sh.console_command_with(message("12", "sneaky"), Some(&pre));
-        sh.console_command_with(message("12", "list"), Some(&pre));
+        sh.console_command_with(message("11", "/op me"), &[&pre]);
+        sh.console_command_with(message("12", "op me"), &[&pre]);
+        sh.console_command_with(message("12", "sneaky"), &[&pre]);
+        sh.console_command_with(message("12", "list"), &[&pre]);
         assert_eq!(sh.console_queue.lock().unwrap().drain(..).collect::<Vec<_>>(), vec!["op Alex".to_string(), "list".to_string()]);
-        assert_eq!(*sh.replies.lock().unwrap(), vec!["not listed".to_string()]);
+        // the refusal goes out as its own message, not into the next log batch
+        assert!(sh.replies.lock().unwrap().is_empty());
+        let jobs = sh.jobs.lock().unwrap();
+        assert_eq!(jobs.len(), 1);
+        match &jobs[0] {
+            relay::Job::Post { channel, body, .. } => {
+                assert_eq!(channel, "500");
+                assert_eq!(body["content"], "not listed");
+            }
+            _ => panic!("expected a post"),
+        }
+        drop(jobs);
         assert!(sh.commands.lock().unwrap().is_empty());
         // Without a preprocessor the message runs as it came.
-        sh.console_command_with(message("12", "op me"), None);
+        sh.console_command_with(message("12", "op me"), &[]);
         assert_eq!(sh.console_queue.lock().unwrap().drain(..).collect::<Vec<_>>(), vec!["op me".to_string()]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// DiscordSRV `api.subscribe` takes any number of listeners and `unsubscribe` removes one.
+    #[test]
+    fn several_preprocessors_chain_and_one_can_be_removed() {
+        let (sh, dir) = console_bridge("chain");
+        let a: Preprocessor = Box::new(|_: &str, c: &str| Preprocess::Run(if c == "x" { "list".into() } else { c.into() }));
+        let b: Preprocessor = Box::new(|_: &str, c: &str| {
+            if c == "list" { Preprocess::Refuse { reply: "no".into() } } else { Preprocess::Run(c.into()) }
+        });
+        sh.console_command_with(message("1", "x"), &[&a, &b]);
+        assert!(sh.console_queue.lock().unwrap().is_empty());
+        assert_eq!(sh.jobs.lock().unwrap().len(), 1);
+        sh.console_command_with(message("1", "x"), &[&a]);
+        assert_eq!(sh.console_queue.lock().unwrap().drain(..).collect::<Vec<_>>(), vec!["list".to_string()]);
+        let h1 = add_console_preprocessor(Box::new(|_: &str, c: &str| Preprocess::Run(c.into())));
+        let h2 = add_console_preprocessor(Box::new(|_: &str, c: &str| Preprocess::Run(c.into())));
+        assert!(remove_console_preprocessor(h1));
+        assert!(!remove_console_preprocessor(h1));
+        assert!(remove_console_preprocessor(h2));
         fs::remove_dir_all(dir).unwrap();
     }
 
