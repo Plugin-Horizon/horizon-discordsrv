@@ -18,9 +18,11 @@
 //!   `f(author_id, command)` gets the Discord user ID of the console channel message and the command
 //!   without its leading slash. It runs on the bridge's gateway thread, after the bot check and
 //!   before the console command list, so a command it returns must still pass the list. It must not
-//!   call `set_console_preprocessor`. One preprocessor is kept; a later call replaces it.
+//!   call these functions. `set_console_preprocessor` keeps only that one; `add_console_preprocessor(f)`
+//!   adds one after the others and returns a `PreprocessorHandle` for `remove_console_preprocessor`. They
+//!   run in order, each gets the command the one before returned, the first `Refuse` ends the chain.
 //! - `enum Preprocess { Run(String), Refuse { reply: String } }`: `Run` runs that command (the
-//!   message as it came, or another one), `Refuse` runs nothing and posts `reply` to the channel.
+//!   message as it came, or another one), `Refuse` runs nothing and posts `reply` to the channel at once.
 //!
 //! Until a preprocessor is set, a console channel message runs as it came.
 
@@ -38,7 +40,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::path::Path;
 
-pub use crate::discordsrv_bridge::{Preprocess, Preprocessor, set_console_preprocessor};
+pub use crate::discordsrv_bridge::{
+    Preprocess, Preprocessor, PreprocessorHandle, add_console_preprocessor, remove_console_preprocessor, set_console_preprocessor,
+};
 
 const ID: &str = "discordsrv";
 /// Relative to the server's `config/` folder.
