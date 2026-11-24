@@ -32,7 +32,7 @@ use mod_api::{
     Command, CommandArgumentValue, CommandSource, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
     NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode, PermissionValueType,
     PlayerAdvancementDoneEvent, PlayerCommandEvent, PlayerDiedEvent, PlayerLoggedInEvent,
-    PlayerLoggedOutEvent, PlayerLoginEvent, RegisterNodeCommandsEvent, RegisterConfigsEvent,
+    PlayerLoggedOutEvent, PlayerLoginEvent, Identifier, TextContent, RegisterNodeCommandsEvent, RegisterConfigsEvent,
     RunModCommandEvent, ServerAboutToStartEvent, ServerChatEvent, ServerHost, ServerStoppingEvent, ServerTickEvent,
     ServerTickPhase, Text,
 };
@@ -92,9 +92,48 @@ fn vanilla_line(key: &str, name: &str) -> Option<String> {
         "death.attack.sweetBerryBush" => "{name} was poked to death by a sweet berry bush",
         "death.attack.stalagmite" => "{name} was impaled on a stalagmite",
         "death.attack.lightningBolt" => "{name} was struck by lightning",
+        // Any other death key: vanilla's en_us line, when it names only the player.
+        other if other.starts_with("death.") => {
+            let line = lang().get(other)?;
+            if line.contains("%2$s") || line.contains("%3$s") {
+                return None;
+            }
+            return Some(line.replace("%1$s", name));
+        }
         _ => return None,
     };
     Some(text.replace("{name}", name))
+}
+
+/// Vanilla's en_us lines for the `death.*` and `advancements.*.title` keys.
+fn lang() -> &'static BTreeMap<String, String> {
+    static LANG: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
+    LANG.get_or_init(|| {
+        serde_json::from_str(include_str!("../data/discordsrv/en_us_subset.json")).unwrap_or_default()
+    })
+}
+
+/// A text as plain characters: literals, and translation keys through [`lang`] (the fallback, else the key).
+fn plain_text(text: &Text) -> String {
+    let mut out = match &text.content {
+        TextContent::Literal(s) => s.clone(),
+        TextContent::Translatable { key, fallback, arguments } => {
+            let mut line = lang().get(key).cloned().or_else(|| fallback.clone()).unwrap_or_else(|| key.clone());
+            for (i, arg) in arguments.iter().enumerate() {
+                let value = plain_text(arg);
+                line = line.replace(&format!("%{}$s", i + 1), &value);
+                if let Some(at) = line.find("%s") {
+                    line.replace_range(at..at + 2, &value);
+                }
+            }
+            line
+        }
+        _ => String::new(),
+    };
+    for child in &text.children {
+        out.push_str(&plain_text(child));
+    }
+    out
 }
 
 /// The death line: the cause's key when it has a line, else the generic one.
@@ -196,16 +235,15 @@ fn players_of(host: &dyn ServerHost) -> Vec<bridge::Player> {
         .collect()
 }
 
-/// TODO(arismoko-api: advancement_display, text_plain): the title of an advancement (a data
-/// pack's too) and whether the game announces it are not readable, so nothing is announced yet.
-/// The key the title would come from is built here, as the glue built it.
-fn advancement_title(advancement: &str) -> Option<String> {
-    let path = advancement.split_once(':').map_or(advancement, |(_, p)| p);
-    if path.starts_with("recipes/") || path.ends_with("/root") {
+/// The title of an announced advancement: None for a hidden one (no display) or one the game does
+/// not announce in chat (`announce_to_chat` false, recipes, roots).
+fn advancement_title(host: &mut dyn ServerHost, advancement: &str) -> Option<String> {
+    let id = Identifier::parse(advancement).ok()?;
+    let display = host.advancement(&id)?.display?;
+    if !display.announce_to_chat {
         return None;
     }
-    let _key = format!("advancements.{}.title", path.replace('/', "."));
-    None
+    Some(plain_text(&display.title))
 }
 
 /// The answer to `/discord <args>`. `sender` is the player (uuid, name); None is the console (or a
@@ -384,11 +422,11 @@ impl Hooks for Mod {
 
     fn player_advancement_done(
         &self,
-        _: &mut dyn ServerHost,
+        host: &mut dyn ServerHost,
         event: &mut PlayerAdvancementDoneEvent<'_>,
     ) {
         let advancement: &str = &event.advancement;
-        let Some(title) = advancement_title(advancement) else {
+        let Some(title) = advancement_title(&mut *host, advancement) else {
             return;
         };
         let dimension = bridge::known_player(event.player)
@@ -513,6 +551,19 @@ mod tests {
     fn unknown_or_missing_death_keys_fall_back_to_the_generic_line() {
         assert_eq!(death_line(Some("death.attack.player"), "Tester"), "Tester died");
         assert_eq!(death_line(None, "Tester"), "Tester died");
+    }
+
+    #[test]
+    fn other_death_keys_come_from_the_lang_table() {
+        assert_eq!(death_line(Some("death.attack.cramming"), "Tester"), "Tester was squished too much");
+        assert_eq!(death_line(Some("death.attack.mob"), "Tester"), "Tester died");
+    }
+
+    #[test]
+    fn translatable_titles_are_flattened_with_the_lang_table() {
+        let t = Text::translate("advancements.story.mine_stone.title", vec![]);
+        assert_eq!(plain_text(&t), "Stone Age");
+        assert_eq!(plain_text(&Text::literal("Custom")), "Custom");
     }
 
     #[test]

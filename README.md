@@ -2,7 +2,7 @@
 
 ## Port status
 
-Compared with DiscordSRV 1.30.x: **80 %** of the original's commands, permissions, config keys, messages and features work today; **81 %** once our open Horizon PRs are merged; **81 %** with the engine changes we are writing; **81 %** with the newest Horizon SDK. Counted on 172/215 items (see HMOD_PORT.md). Status: not yet compiled after the 2026-11-20 round.
+Compared with DiscordSRV 1.30.x: **81 %** of the original's commands, permissions, config keys, messages and features work today; **81 %** once our open Horizon PRs are merged; **81 %** with the engine changes we are writing; **81 %** with the newest Horizon SDK. Counted on 174/215 items (see HMOD_PORT.md). Status: not yet compiled after the 2026-11-20 round.
 
 > **Unofficial Rust port of DiscordSRV for the Horizon server (https://github.com/arismoko/horizon). Not affiliated with or endorsed by the DiscordSRV authors.**
 
@@ -153,7 +153,7 @@ What does not work yet on arismoko/horizon (each is marked `TODO(arismoko-api: .
 - Death notices name only the causes in the table of `vanilla_line` (the common ones without a killer). A player killed by
   a player or a mob is announced with the generic "died" line: the killer and the held item are not known to the hook.
 - Death lines fall back to the generic text because the killer and item names are not passed to the hook.
-- Advancement announcements are not sent yet (title and announce flag are not readable).
+- Advancement announcements use `host.advancement(id)` (title, announce flag) and an embedded en_us table for translated titles; a title key outside vanilla shows as its key. Death keys without a killer use the en_us table too.
 - Only a fixed set of message keys has a line; a server in another language gets English there.
 - `/discord reload` re-reads the config and restarts the bridge (the gateway reconnects; no shutdown or startup message). `/discord resync` answers DiscordSRV's "group synchonization requires valid ... entries" line, because group and role synchronisation is not ported. `/discord debugger` switches the debug categories (`[<CATEGORY> DEBUG]` log lines for chat in both directions; the `Debug` config list works too); `/discord debugger upload` writes a report file under `config/discordsrv/debug/` instead of uploading it to a paste service. `/discord debug` does not exist in DiscordSRV 1.30 either (only its usage text mentions it): it answers "That command doesn't exist!".
 - Config keys read: `MinecraftMentionSound` (the note-block pling to an online player a Discord message mentions as `@name`), `ForcedLanguage` and `Timezone` (only `none`/English and `default` are applied; others warn), `Debug`, the webhook keys and the `Webhook` part of the notices. Not read: `Experiment_Jdbc*`, `Experiment_MCDiscordReserializer_*`, the proxy settings, `ForceTLSv`, `NoopHostnameVerifier`, `DisabledPluginHooks`, `UseModernPaperChatEvent`, `VentureChatBungee`, `EnablePresenceInformation`, the DNS key.
