@@ -28,6 +28,8 @@ pub enum FromDiscord {
 pub struct ChatFilters {
     pub game: Filters,
     pub discord: Filters,
+    /// `Experiment_WebhookChatMessageUsernameFilters`: regexes over the webhook's username.
+    pub webhook_username: Filters,
 }
 
 impl ChatFilters {
@@ -35,6 +37,7 @@ impl ChatFilters {
         Ok(ChatFilters {
             game: Filters::new(&chat.discord_chat_channel_game_filters)?,
             discord: Filters::new(&chat.discord_chat_channel_discord_filters)?,
+            webhook_username: Filters::new(&chat.experiment_webhook_chat_message_username_filters)?,
         })
     }
 }
@@ -398,7 +401,7 @@ pub fn webhook_message(chat: &Chat, filters: &ChatFilters, cache: &Cache, m: &Ga
         chat.experiment_webhook_chat_message_username_format.as_str()
     };
     let mut name = fill(name_format, &[("displayname", &display), ("username", &username)]);
-    name = filters.game.apply(&name)?;
+    name = filters.webhook_username.apply_all(&name);
     let (discord_name, discord_username) = member.map_or((String::new(), String::new()), |m| {
         (m.effective_name().to_string(), m.username.clone())
     });
@@ -565,6 +568,17 @@ mod tests {
         assert_eq!(text.chars().count(), 2000);
         assert!(text.ends_with("..."));
         assert_eq!(link_required_text("", "hi"), None);
+    }
+
+    #[test]
+    fn webhook_username_filters_run_over_the_name_and_may_empty_it_to_nothing() {
+        let f = ChatFilters::new(&Chat {
+            experiment_webhook_chat_message_username_filters: vec![("(?i)admin".into(), "A".into())],
+            ..Chat::default()
+        })
+        .unwrap();
+        assert_eq!(f.webhook_username.apply_all("SuperAdmin"), "SuperA");
+        assert_eq!(f.webhook_username.apply_all("Steve"), "Steve");
     }
 
     #[test]

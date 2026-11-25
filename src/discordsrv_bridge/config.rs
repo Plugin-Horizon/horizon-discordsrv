@@ -258,6 +258,11 @@ pub struct Chat {
     /// Minutes between the synchronizations of the players on the server (at least 1).
     #[serde(default = "five")]
     pub group_role_synchronization_cycle_time: u64,
+    /// `GroupRoleSynchronizationCycleCompletely`: the timer synchronises every linked player, not only those online.
+    pub group_role_synchronization_cycle_completely: bool,
+    /// `NicknameSynchronizationCycleTime`: minutes between nickname synchronisations (at least 3).
+    #[serde(default = "three")]
+    pub nickname_synchronization_cycle_time: u64,
     /// `NicknameSynchronizationEnabled`: the linked Discord member's nickname follows the player's name.
     pub nickname_synchronization_enabled: bool,
     /// `%username%` and `%displayname%` (both the player's name); cut to Discord's 32 characters.
@@ -277,6 +282,9 @@ pub struct Chat {
     /// `Experiment_WebhookChatMessageFormat`; empty: `%message%`.
     #[serde(rename = "Experiment_WebhookChatMessageFormat")]
     pub experiment_webhook_chat_message_format: String,
+    /// `Experiment_WebhookChatMessageUsernameFilters`: ordered `[regex, replacement]` pairs run over the webhook username.
+    #[serde(rename = "Experiment_WebhookChatMessageUsernameFilters")]
+    pub experiment_webhook_chat_message_username_filters: Vec<(String, String)>,
     /// `Experiment_WebhookChatMessageUsernameFromDiscord`: the linked Discord member's name.
     #[serde(rename = "Experiment_WebhookChatMessageUsernameFromDiscord")]
     pub experiment_webhook_chat_message_username_from_discord: bool,
@@ -372,6 +380,10 @@ pub struct Chat {
 
 fn nick_format() -> String {
     "%displayname%".to_string()
+}
+
+fn three() -> u64 {
+    3
 }
 
 fn five() -> u64 {

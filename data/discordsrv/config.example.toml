@@ -89,6 +89,7 @@ Experiment_WebhookChatMessageDelivery = false
 Experiment_WebhookChatMessageUsernameFormat = "%displayname%"
 Experiment_WebhookChatMessageFormat = "%message%"
 Experiment_WebhookChatMessageUsernameFromDiscord = false
+Experiment_WebhookChatMessageUsernameFilters = []
 Experiment_WebhookChatMessageAvatarFromDiscord = false
 DiscordChatChannelBlockedIds = []
 DiscordChatChannelBlockedRolesAsWhitelist = false
@@ -197,6 +198,8 @@ GroupRoleSynchronizationOneWay = false
 GroupRoleSynchronizationPrimaryGroupOnly = false
 GroupRoleSynchronizationOnLink = true
 GroupRoleSynchronizationCycleTime = 5
+GroupRoleSynchronizationCycleCompletely = false
+NicknameSynchronizationCycleTime = 3
 # Ban synchronisation. The Discord -> Minecraft reason takes & colour codes (stripped for the ban list).
 BanSynchronizationDiscordToMinecraft = false
 BanSynchronizationMinecraftToDiscord = false

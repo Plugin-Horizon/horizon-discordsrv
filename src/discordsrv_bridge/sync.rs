@@ -126,18 +126,28 @@ pub fn nickname(format: &str, name: &str) -> String {
 }
 
 static LAST_CYCLE_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_NICK_CYCLE_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether a synchronisation of everyone is due: `minutes` (at least 1) after the last one.
 /// The first call arms the timer and answers false.
 pub fn cycle_due(minutes: u64) -> bool {
+    timer_due(&LAST_CYCLE_MS, minutes)
+}
+
+/// The nickname updater's timer (`NicknameSynchronizationCycleTime`, at least 3 minutes as in NicknameUpdater).
+pub fn nickname_cycle_due(minutes: u64) -> bool {
+    timer_due(&LAST_NICK_CYCLE_MS, minutes.max(3))
+}
+
+fn timer_due(clock: &AtomicU64, minutes: u64) -> bool {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    let last = LAST_CYCLE_MS.load(Ordering::Relaxed);
+    let last = clock.load(Ordering::Relaxed);
     if last == 0 {
-        LAST_CYCLE_MS.store(now, Ordering::Relaxed);
+        clock.store(now, Ordering::Relaxed);
         return false;
     }
     if now.saturating_sub(last) >= minutes.max(1) * 60_000 {
-        LAST_CYCLE_MS.store(now, Ordering::Relaxed);
+        clock.store(now, Ordering::Relaxed);
         return true;
     }
     false
@@ -179,6 +189,11 @@ impl Shared {
         }
     }
 
+    /// The nickname updater's cycle: only the nicknames of these players.
+    pub(crate) fn sync_nicknames_of(&self, players: &HashMap<u128, Groups>) {
+        self.sync_nicknames(players);
+    }
+
     /// The UUIDs of every linked player.
     pub(crate) fn linked_uuids(&self) -> Vec<u128> {
         self.lock_state().accounts.all_uuids()
@@ -186,14 +201,14 @@ impl Shared {
 
     /// Synchronises the given players; returns how many Discord members got a change.
     /// Network calls: runs on the chat thread, never the server thread.
-    pub(crate) fn resync_players(&self, players: &HashMap<u128, Groups>, direction: Direction) -> usize {
+    pub(crate) fn resync_players(&self, players: &HashMap<u128, Groups>, direction: Direction, nicknames: bool) -> usize {
         let c = &self.config.chat;
         let Some(minecraft_wins) =
             winner(c.group_role_synchronization_one_way, c.group_role_synchronization_minecraft_is_authoritative, direction)
         else {
             return 0;
         };
-        if direction != Direction::ToMinecraft {
+        if nicknames && direction != Direction::ToMinecraft {
             self.sync_nicknames(players);
         }
         if !self.sync_enabled() {
@@ -273,6 +288,15 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nickname_timer_is_separate_and_at_least_three_minutes() {
+        let c: crate::discordsrv_bridge::config::Chat = toml::from_str("").unwrap();
+        assert_eq!(c.nickname_synchronization_cycle_time, 3);
+        assert!(!c.group_role_synchronization_cycle_completely);
+        assert!(!nickname_cycle_due(1)); // first call arms the timer
+        assert!(!nickname_cycle_due(1)); // 1 minute is raised to 3: not due yet
+    }
 
     fn map() -> HashMap<String, String> {
         HashMap::from([

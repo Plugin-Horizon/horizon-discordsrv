@@ -40,6 +40,15 @@ impl Filters {
             .map(Filters)
     }
 
+    /// The text after every filter, kept even when empty (WebhookUtil's username regexes).
+    pub fn apply_all(&self, text: &str) -> String {
+        let mut text = text.to_string();
+        for (re, rep) in &self.0 {
+            text = re.replace_all(&text, rep.as_str()).into_owned();
+        }
+        text
+    }
+
     /// The line after every filter, or None when it ended up empty.
     pub fn apply(&self, message: &str) -> Option<String> {
         let mut text = message.to_string();

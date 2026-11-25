@@ -125,6 +125,10 @@ pub struct TickWork {
     /// (every linked player when `resync_all`).
     pub resync: Vec<u128>,
     pub resync_all: bool,
+    /// The group timer's players (`GroupRoleSynchronizationCycleCompletely`: all linked): groups only, no nicknames.
+    pub resync_cycle: Vec<u128>,
+    /// The nickname timer's players (`NicknameSynchronizationCycleTime`): nicknames only.
+    pub resync_nicknames: Vec<u128>,
     /// A Discord role edit wants the groups of these players to follow (Discord decides).
     pub resync_to_minecraft: Vec<u128>,
     /// Groups to give (`true`) or take from a player: Discord -> Minecraft synchronisation. The server
@@ -480,10 +484,19 @@ pub fn tick(tps: f32, players: impl FnOnce() -> Vec<Player>) -> TickWork {
             }
         }
     }
-    if (sh.sync_enabled() || sh.config.chat.nickname_synchronization_enabled) && sync::cycle_due(sh.config.chat.group_role_synchronization_cycle_time.max(1)) {
-        // GroupRoleSynchronizationCycleTime: the players on the server (not everyone linked).
+    if sh.sync_enabled() && sync::cycle_due(sh.config.chat.group_role_synchronization_cycle_time.max(1)) {
+        // GroupRoleSynchronizationCycleTime: the players on the server, or every linked player with
+        // GroupRoleSynchronizationCycleCompletely.
+        if sh.config.chat.group_role_synchronization_cycle_completely {
+            work.resync_cycle.extend(sh.linked_uuids());
+        } else {
+            let online: Vec<u128> = sh.lock_state().players.iter().map(|p| p.uuid).collect();
+            work.resync_cycle.extend(online);
+        }
+    }
+    if sh.config.chat.nickname_synchronization_enabled && sync::nickname_cycle_due(sh.config.chat.nickname_synchronization_cycle_time) {
         let online: Vec<u128> = sh.lock_state().players.iter().map(|p| p.uuid).collect();
-        work.resync.extend(online);
+        work.resync_nicknames.extend(online);
     }
     work.commands.extend(sh.commands.lock().map(|mut q| q.drain(..).collect::<Vec<_>>()).unwrap_or_default());
     work.console.extend(sh.console_queue.lock().map(|mut q| q.drain(..).collect::<Vec<_>>()).unwrap_or_default());
@@ -714,7 +727,21 @@ pub fn world_alias(dimension: &str, world: &str) -> String {
 /// the Discord roles are changed on the chat thread.
 pub fn resync(players: HashMap<u128, sync::Groups>, direction: sync::Direction) {
     if let Some(sh) = shared() {
-        sh.push_job(relay::Job::Resync { players, direction });
+        sh.push_job(relay::Job::Resync { players, direction, nicknames: true });
+    }
+}
+
+/// The group timer's batch: roles only (the nickname timer has its own cycle).
+pub fn resync_groups_only(players: HashMap<u128, sync::Groups>) {
+    if let Some(sh) = shared() {
+        sh.push_job(relay::Job::Resync { players, direction: sync::Direction::Authoritative, nicknames: false });
+    }
+}
+
+/// The nickname timer's batch.
+pub fn resync_nicknames(players: HashMap<u128, sync::Groups>) {
+    if let Some(sh) = shared() {
+        sh.push_job(relay::Job::Nicknames { players });
     }
 }
 
@@ -728,7 +755,7 @@ pub fn groups_changed(uuid: u128, groups: sync::Groups) {
         && sh.sync_enabled()
         && sh.lock_state().accounts.discord_of(uuid).is_some()
     {
-        sh.push_job(relay::Job::Resync { players: HashMap::from([(uuid, groups)]), direction: sync::Direction::ToDiscord });
+        sh.push_job(relay::Job::Resync { players: HashMap::from([(uuid, groups)]), direction: sync::Direction::ToDiscord, nicknames: false });
     }
 }
 

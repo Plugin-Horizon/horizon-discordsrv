@@ -61,7 +61,11 @@ pub enum Job {
     Resync {
         players: std::collections::HashMap<u128, crate::discordsrv_bridge::sync::Groups>,
         direction: crate::discordsrv_bridge::sync::Direction,
+        /// Whether the nicknames follow too (not on the group timer or an instant group update).
+        nicknames: bool,
     },
+    /// The nickname timer: nicknames of these players only.
+    Nicknames { players: std::collections::HashMap<u128, crate::discordsrv_bridge::sync::Groups> },
     /// A Discord account banned (`true`) or unbanned in the main guild.
     DiscordBan { discord: String, ban: bool },
     /// An alert of alerts.yml whose conditions held: the message (its `${...}` already written in) goes to
@@ -636,8 +640,9 @@ impl Shared {
                     }
                 }
             }
-            Job::Resync { players, direction } => {
-                let changed = self.resync_players(&players, direction);
+            Job::Nicknames { players } => self.sync_nicknames_of(&players),
+            Job::Resync { players, direction, nicknames } => {
+                let changed = self.resync_players(&players, direction, nicknames);
                 log::info!(target: "horizon_discordsrv", "[DiscordSRV] Group synchronization finished: {} players, {changed} changed", players.len());
             }
             Job::DiscordBan { discord, ban } => {

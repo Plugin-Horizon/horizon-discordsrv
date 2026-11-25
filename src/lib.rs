@@ -538,7 +538,7 @@ impl Hooks for Mod {
         if self.extras_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 20 == 0 && bridge::chat_running() {
             publish_extras(&mut *host);
         }
-        let work = bridge::tick(tps, || players_of(&*host));
+        let mut work = bridge::tick(tps, || players_of(&*host));
         for command in work.commands {
             host.commands().run_command(&command);
         }
@@ -563,6 +563,20 @@ impl Hooks for Mod {
         if work.resync_all || !work.resync.is_empty() {
             let uuids = if work.resync_all { bridge::linked_uuids() } else { work.resync.clone() };
             batches.push((bridge::sync::Direction::Authoritative, uuids));
+        }
+        for (uuids, nicks) in [(std::mem::take(&mut work.resync_cycle), false), (std::mem::take(&mut work.resync_nicknames), true)] {
+            if uuids.is_empty() {
+                continue;
+            }
+            let mut players = HashMap::new();
+            for uuid in uuids {
+                players.insert(uuid, groups_of(&mut *host, uuid));
+            }
+            if nicks {
+                bridge::resync_nicknames(players);
+            } else {
+                bridge::resync_groups_only(players);
+            }
         }
         if !work.resync_to_minecraft.is_empty() {
             batches.push((bridge::sync::Direction::ToMinecraft, work.resync_to_minecraft.clone()));
