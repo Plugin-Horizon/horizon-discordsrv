@@ -383,7 +383,7 @@ impl Hooks for Mod {
         for (uuid, line) in work.kicks {
             if let Some(player) = host.player(uuid) {
                 let text = legacy(&*host, &line);
-                let _ = host.player_disconnect(player, text);
+                let _ = player.disconnect(host, text);
             }
         }
         if work.resync_all || !work.resync.is_empty() {
