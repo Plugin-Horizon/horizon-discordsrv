@@ -220,6 +220,7 @@ ChannelUpdater:
 MinecraftDiscordAccountLinkedConsoleCommands: ["", "say linked"]
 ProxyHost: "example.invalid"
 Experiment_JdbcUsername: "not-a-real-user"
+ForceTLSv12: true
 DiscordChatChannelRoleAliases: {"Developer": "Dev"}
 "#;
 
@@ -344,7 +345,8 @@ DiscordChatChannelRoleAliases: {"Developer": "Dev"}
         let s = summarize("config.yml", CONFIG);
         assert!(s.error.is_none());
         assert!(s.read.contains(&"ProxyHost".to_string()), "the proxy keys are read since round 4");
-        assert!(s.unread.contains(&"Experiment_JdbcUsername".to_string()));
+        assert!(s.unread.contains(&"ForceTLSv12".to_string()));
+        assert!(s.read.contains(&"Experiment_JdbcUsername".to_string()));
         assert!(s.read.contains(&"DiscordConsoleChannelId".to_string()));
         assert!(s.read.contains(&"BotToken".to_string()));
         let text = format!("{:?}", s.read) + &format!("{:?}", s.unread);

@@ -11,7 +11,20 @@ use std::path::PathBuf;
 
 use crate::discordsrv_bridge::server::{parse_uuid, uuid_string};
 
+/// The account table of the JDBC backend (`Experiment_JdbcAccountLinkBackend`), as [`crate::discordsrv_bridge::jdbc`] reads
+/// and writes it. A trait so the logic is tested without a database.
+pub trait LinkStore: Send {
+    /// Every row: (discord id, uuid text).
+    fn read(&mut self) -> Result<Vec<(String, String)>, String>;
+    fn delete(&mut self, discord: &str) -> Result<(), String>;
+    fn upsert(&mut self, discord: &str, uuid: &str) -> Result<(), String>;
+}
+
 pub struct Accounts {
+    /// With a store the links live there and `accounts.aof` is not written.
+    store: Option<Box<dyn LinkStore>>,
+    /// What the store held at the last read or write: Discord ID -> UUID.
+    remote: HashMap<String, u128>,
     path: PathBuf,
     /// Discord ID -> player UUID.
     links: HashMap<String, u128>,
@@ -60,7 +73,26 @@ impl Accounts {
                 links.insert(id.to_string(), uuid);
             }
         }
-        Accounts { path, links, codes: HashMap::new() }
+        Accounts { store: None, remote: HashMap::new(), path, links, codes: HashMap::new() }
+    }
+
+    /// The links of a JDBC store (the file is not read or written). An unreadable table is an error.
+    pub fn with_store(path: PathBuf, mut store: Box<dyn LinkStore>) -> Result<Accounts, String> {
+        let remote = Self::read_store(store.as_mut())?;
+        Ok(Accounts { store: Some(store), links: remote.clone(), remote, path, codes: HashMap::new() })
+    }
+
+    fn read_store(store: &mut dyn LinkStore) -> Result<HashMap<String, u128>, String> {
+        Ok(store.read()?.into_iter().filter_map(|(d, u)| parse_uuid(&u).map(|u| (d, u))).collect())
+    }
+
+    /// Reads the store again (links other servers made); nothing happens without a store.
+    pub fn refresh(&mut self) -> Result<(), String> {
+        if let Some(store) = self.store.as_mut() {
+            self.remote = Self::read_store(store.as_mut())?;
+            self.links = self.remote.clone();
+        }
+        Ok(())
     }
 
     pub fn uuid_of(&self, discord: &str) -> Option<u128> {
@@ -146,7 +178,22 @@ impl Accounts {
     }
 
     /// The whole file again (small: one line a linked player), through a temporary file.
-    fn save(&self) -> Result<(), String> {
+    fn save(&mut self) -> Result<(), String> {
+        if let Some(store) = self.store.as_mut() {
+            // Rows that are gone or changed go first (a UUID is unique in the table), then the new and changed ones.
+            let mut gone: Vec<&String> = self.remote.iter().filter(|(d, u)| self.links.get(*d) != Some(*u)).map(|(d, _)| d).collect();
+            gone.sort();
+            for d in gone {
+                store.delete(d)?;
+            }
+            let mut fresh: Vec<(&String, &u128)> = self.links.iter().filter(|(d, u)| self.remote.get(*d) != Some(*u)).collect();
+            fresh.sort();
+            for (d, u) in fresh {
+                store.upsert(d, &uuid_string(*u))?;
+            }
+            self.remote = self.links.clone();
+            return Ok(());
+        }
         let mut lines: Vec<String> = self.links.iter().map(|(id, u)| format!("{id} {}", uuid_string(*u))).collect();
         lines.sort();
         let tmp = self.path.with_extension("aof.tmp");
@@ -230,6 +277,46 @@ mod tests {
         assert_eq!(a.unlink_discord("222222222222222222").unwrap(), Some(8));
         assert_eq!(a.unlink_discord("222222222222222222").unwrap(), None);
         fs::remove_dir_all(d).unwrap();
+    }
+
+    struct Fake(std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>);
+
+    impl LinkStore for Fake {
+        fn read(&mut self) -> Result<Vec<(String, String)>, String> {
+            Ok(self.0.lock().unwrap().clone())
+        }
+        fn delete(&mut self, discord: &str) -> Result<(), String> {
+            self.0.lock().unwrap().retain(|(d, _)| d != discord);
+            Ok(())
+        }
+        fn upsert(&mut self, discord: &str, uuid: &str) -> Result<(), String> {
+            let mut rows = self.0.lock().unwrap();
+            // The uuid column is unique too: the table refuses a second row with it.
+            if rows.iter().any(|(d, u)| u == uuid && d != discord) {
+                return Err("duplicate uuid".into());
+            }
+            rows.retain(|(d, _)| d != discord);
+            rows.push((discord.into(), uuid.into()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_store_keeps_the_links_and_no_file_is_written() {
+        let rows = std::sync::Arc::new(std::sync::Mutex::new(vec![("111".to_string(), uuid_string(7))]));
+        let path = PathBuf::from("/nonexistent/accounts.aof");
+        let mut a = Accounts::with_store(path, Box::new(Fake(rows.clone()))).unwrap();
+        assert_eq!(a.uuid_of("111"), Some(7));
+        // A relink to another account: the old row goes before the new one is written.
+        let code = a.new_code(7, "alex");
+        a.redeem("222", &code, true).unwrap();
+        assert_eq!(*rows.lock().unwrap(), vec![("222".to_string(), uuid_string(7))]);
+        assert_eq!(a.unlink(7).unwrap(), Some("222".into()));
+        assert!(rows.lock().unwrap().is_empty());
+        // Another server links someone: refresh sees it.
+        rows.lock().unwrap().push(("333".into(), uuid_string(9)));
+        a.refresh().unwrap();
+        assert_eq!(a.uuid_of("333"), Some(9));
     }
 
     #[test]

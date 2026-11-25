@@ -58,6 +58,15 @@ pub struct Config {
     /// a member is doing (`user_online_status`, `user_game_name`, `linked_online` ...) have an answer. Off by default:
     /// the intent must be switched on for the bot in the Developer Portal first.
     pub enable_presence_information: bool,
+    /// `Experiment_JdbcAccountLinkBackend`: `jdbc:mysql://HOST:PORT/DATABASE?...`; the placeholder URL means off.
+    #[serde(rename = "Experiment_JdbcAccountLinkBackend")]
+    pub jdbc_account_link_backend: String,
+    #[serde(rename = "Experiment_JdbcTablePrefix")]
+    pub jdbc_table_prefix: String,
+    #[serde(rename = "Experiment_JdbcUsername")]
+    pub jdbc_username: String,
+    #[serde(rename = "Experiment_JdbcPassword")]
+    pub jdbc_password: Secret,
     /// `DisabledPluginHooks`: hooks that are not used, by name (case does not matter): `LuckPerms-GroupUpdates`,
     /// `LuckPerms-Contexts` (or `LuckPerms` for both), `PlaceholderAPI`, `Multiverse-Core`, `SuperVanish`, `Vault`.
     pub disabled_plugin_hooks: Vec<String>,
@@ -605,6 +614,10 @@ impl Default for Config {
             chat: Chat::default(),
             voice: VoiceSettings::default(),
             enable_presence_information: false,
+            jdbc_account_link_backend: String::new(),
+            jdbc_table_prefix: String::new(),
+            jdbc_username: String::new(),
+            jdbc_password: Secret::default(),
             disabled_plugin_hooks: Vec::new(),
         }
     }

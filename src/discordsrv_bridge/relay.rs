@@ -816,6 +816,7 @@ pub fn chat_loop(shared: &Shared) {
     let mut next_names: Vec<Instant> = c.channel_updater.iter().map(|_| Instant::now() + Duration::from_secs(5)).collect();
     let mut watchdog_fired = false;
     let mut next_counts = Instant::now();
+    let mut next_refresh = Instant::now() + Duration::from_secs(60);
     loop {
         let stopping = shared.stop.load(Ordering::Relaxed);
         shared.drain_jobs(&mut expiring);
@@ -836,6 +837,13 @@ pub fn chat_loop(shared: &Shared) {
             let _ = shared.rest.delete_message(&channel, &id);
         }
 
+        if !stopping && now >= next_refresh {
+            // Links other servers made in the shared JDBC table.
+            next_refresh = now + Duration::from_secs(60);
+            if let Err(e) = shared.lock_state().accounts.refresh() {
+                log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't read the JDBC links: {e}");
+            }
+        }
         let players = shared.lock_state().players.clone();
         if !stopping && now >= next_counts && shared.counts_wanted.swap(false, Ordering::Relaxed) {
             // `guild_members_online`: the guild's approximate counts, asked for once a minute at most.

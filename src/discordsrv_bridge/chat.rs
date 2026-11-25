@@ -703,7 +703,7 @@ mod webhook_tests {
     }
 
     fn member() -> Member {
-        Member { username: "jebdiscord".into(), global_name: None, nick: Some("Jeb D".into()), roles: vec![], avatar_url: String::new() }
+        Member { username: "jebdiscord".into(), global_name: None, nick: Some("Jeb D".into()), roles: vec![], avatar_url: String::new(), boosting: false }
     }
 
     fn pair(name: &str, content: &str) -> Option<(String, String)> {

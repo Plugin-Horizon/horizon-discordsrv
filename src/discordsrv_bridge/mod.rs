@@ -15,6 +15,7 @@ pub mod feed;
 pub mod format;
 pub mod gateway;
 pub mod guild;
+pub mod jdbc;
 pub mod linking;
 pub mod original;
 pub mod placeholders;
@@ -368,7 +369,20 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
     };
     let home = config_dir.parent().map(Path::to_path_buf).unwrap_or_default();
     let accounts_file = if config.chat.accounts_file.trim().is_empty() { "accounts.aof" } else { &config.chat.accounts_file };
-    let accounts = linking::Accounts::load(dir.join(accounts_file));
+    let accounts = match jdbc::connect(&config).and_then(|store| match store {
+        Some(store) => linking::Accounts::with_store(dir.join(accounts_file), store).map(Some),
+        None => Ok(None),
+    }) {
+        Ok(Some(a)) => {
+            log::info!(target: "horizon_discordsrv", "[DiscordSRV] Account links are kept in the JDBC database");
+            a
+        }
+        Ok(None) => linking::Accounts::load(dir.join(accounts_file)),
+        Err(e) => {
+            log::error!(target: "horizon_discordsrv", "[DiscordSRV] Not using JDBC: {e}");
+            linking::Accounts::load(dir.join(accounts_file))
+        }
+    };
     let alert_list = build_alerts(&config);
     let shared = Arc::new(Shared {
         rest: rest::Rest::with_proxy(&config.api_base_url, &token, config.proxy().as_ref()),
@@ -746,7 +760,7 @@ pub fn placeholder(uuid: Option<u128>, identifier: &str) -> Option<String> {
     if !hook_enabled("PlaceholderAPI") {
         return None;
     }
-    placeholders::value(&shared()?, uuid, identifier)
+    placeholders::value(&*shared()?, uuid, identifier)
 }
 
 /// The LuckPerms contexts for a player (`discordsrv:contexts`): key and value pairs, see [`placeholders::contexts`].
