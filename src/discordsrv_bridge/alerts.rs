@@ -198,7 +198,8 @@ pub fn prepare(alert: &Alert, ev: &Event, log: &mut Vec<String>) -> Option<Messa
             Err(e) => log.push(format!("Error while evaluating expression \"{c}\" -> {e}")),
         }
     }
-    let f = |s: &str| expand(s, ev, log);
+    let cell = std::cell::RefCell::new(log);
+    let f = |s: &str| expand(s, ev, &mut cell.borrow_mut());
     Some(map_strings(&alert.template, &f))
 }
 

@@ -534,8 +534,10 @@ impl Hooks for Mod {
         let Some(text) = event.message.as_ref() else {
             return;
         };
-        let tr = host_translate(&*host);
-        let message = plain_text_with(text, &tr);
+        let message = {
+            let tr = host_translate(&*host);
+            plain_text_with(text, &tr)
+        };
         if message.trim().is_empty() {
             return;
         }
