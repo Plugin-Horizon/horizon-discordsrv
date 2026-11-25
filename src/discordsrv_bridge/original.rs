@@ -334,7 +334,7 @@ DiscordChatChannelRoleAliases: {"Developer": "Dev"}
     fn the_summary_names_unread_keys_and_no_values() {
         let s = summarize("config.yml", CONFIG);
         assert!(s.error.is_none());
-        assert!(s.unread.contains(&"ProxyHost".to_string()));
+        assert!(s.read.contains(&"ProxyHost".to_string()), "the proxy keys are read since round 4");
         assert!(s.unread.contains(&"Experiment_JdbcUsername".to_string()));
         assert!(s.read.contains(&"DiscordConsoleChannelId".to_string()));
         assert!(s.read.contains(&"BotToken".to_string()));
