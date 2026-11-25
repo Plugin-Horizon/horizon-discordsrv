@@ -249,12 +249,43 @@ Timestamp = false
 # Require linked account to play (linking.yml). Off: anyone may log in. On: an unlinked player is
 # refused with the kick text; {BOT}, {CODE} and {INVITE} are filled in. Empty texts use the defaults.
 # A player who unlinks is kicked with "Kicked for unlinking" (default text when empty).
-# The membership, subscriber role, whitelist and ban checks of DiscordSRV are not ported.
+# The checks run in DiscordSRV's order: bypass names, vanilla whitelist, banned players, the link,
+# membership of the Discord server(s), the subscriber roles. IP bans are not looked at (the login
+# hook has no address). "Listener priority" and "Listener event" are read and have no effect.
 ["Require linked account to play"]
 Enabled = false
 "Bypass names" = []
+"Whitelisted players bypass check" = true
+"Check banned players" = false
+"Only check banned players" = false
 "Not linked message" = ""
+# true: in a Discord server the bot is in; false: no check; "<server id>" or ["<id>", ...]: all of them.
+"Must be in Discord server" = true
+
+["Require linked account to play"."Subscriber role"]
+"Require subscriber role to join" = false
+"Subscriber roles" = []
+"Require all of the listed roles" = false
+"Kick message" = ""
 
 ["Require linked account to play".Messages]
 "DiscordSRV still starting" = ""
 "Kicked for unlinking" = ""
+"Not in server" = ""
+"Failed to find subscriber role" = ""
+"Failed for unknown reason" = ""
+
+# Alerts (alerts.yml): a message to Discord when something happens. Triggers: PlayerJoinEvent,
+# PlayerQuitEvent, PlayerDeathEvent, PlayerAdvancementDoneEvent, AsyncPlayerChatEvent or AsyncChatEvent,
+# PlayerCommandPreprocessEvent, ServerCommandEvent, or "/command". Conditions and ${...} use a small
+# expression language (see README). The message sections are the ones of the join notice.
+#
+# [[Alerts]]
+# Trigger = "/gamemode"
+# Channel = "main"
+# Conditions = ["#args.size() > 0"]
+# [Alerts.Embed]
+# Color = "#ff0000"
+# [Alerts.Embed.Author]
+# ImageUrl = "{embedavatarurl}"
+# Name = "{username} changed gamemode to ${#args.get(0)}"

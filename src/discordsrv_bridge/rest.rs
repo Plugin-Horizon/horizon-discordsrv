@@ -32,8 +32,20 @@ pub struct Rest {
 
 impl Rest {
     pub fn new(base: &str, token: &str) -> Rest {
+        Rest::with_proxy(base, token, None)
+    }
+
+    /// With `ProxyHost` and its siblings set, the requests go through that HTTP proxy.
+    pub fn with_proxy(base: &str, token: &str, proxy: Option<&crate::discordsrv_bridge::config::Proxy>) -> Rest {
+        let mut builder = ureq::AgentBuilder::new().timeout(Duration::from_secs(15));
+        if let Some(p) = proxy {
+            match ureq::Proxy::new(p.ureq_url()) {
+                Ok(proxy) => builder = builder.proxy(proxy),
+                Err(e) => log::error!(target: "horizon_discordsrv", "[DiscordSRV] Failed to generate a proxy from config options: {e}"),
+            }
+        }
         Rest {
-            agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build(),
+            agent: builder.build(),
             base: base.trim_end_matches('/').to_string(),
             auth: format!("Bot {token}"),
             hooks: Mutex::new(HashMap::new()),

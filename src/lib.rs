@@ -29,7 +29,7 @@
 pub mod discordsrv_bridge;
 use discordsrv_bridge as bridge;
 use mod_api::{
-    Command, CommandArgumentValue, CommandSource, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
+    Command, CommandArgumentValue, CommandSource, ConsoleCommandEvent, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
     NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode, PermissionValueType,
     BanChangedEvent, BanListKind, PlayerAdvancementDoneEvent, PlayerCommandEvent, PlayerDeathMessageEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, PlayerLoginEvent, Identifier, RegisterNodeCommandsEvent, RegisterConfigsEvent,
@@ -145,16 +145,9 @@ fn plain_text(text: &Text) -> String {
     plain_text_with(text, &|_| None)
 }
 
-/// The server's own language text for a key (`ServerHost::translate`, engine branch `rec-server-translate`).
-#[cfg(feature = "next-engine")]
+/// The server's own language text for a key (`ServerHost::translate`).
 fn host_translate(host: &dyn ServerHost) -> impl Fn(&str) -> Option<String> + '_ {
     move |key| host.translate(key)
-}
-
-/// Without the engine call only the built-in English table answers.
-#[cfg(not(feature = "next-engine"))]
-fn host_translate(_: &dyn ServerHost) -> impl Fn(&str) -> Option<String> {
-    |_| None
 }
 
 /// [`plain_text`] with `tr` asked first for each translation key (then the table, the fallback, the key).
@@ -242,6 +235,73 @@ fn has_node(host: &mut dyn ServerHost, uuid: u128, node_name: &str, default_leve
         return default_level == 0;
     };
     player.permission_bool(host, &node(node_name)).unwrap_or(false)
+}
+
+/// The vanilla whitelist and the name ban list for a player: the two facts `Require linked account to
+/// play` asks of the server. An ended ban that the list still holds does not count.
+fn login_facts(host: &dyn ServerHost, uuid: u128) -> (bool, bool) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let banned = host
+        .server_ban_list(BanListKind::Players)
+        .iter()
+        .any(|b| b.uuid == Some(uuid) && b.expires_millis.is_none_or(|t| t > now));
+    (host.server_is_whitelisted(uuid), banned)
+}
+
+/// A game event for alerts.yml (does nothing without alerts): the player's facts and the permission
+/// question are gathered here, where the host is.
+fn alert(host: &mut dyn ServerHost, kind: bridge::alerts::Kind, uuid: Option<u128>, message: &str, cancelled: bool) {
+    if !bridge::alerts_on() {
+        return;
+    }
+    let (facts, ping, known) = match uuid.and_then(|u| host.player(u).map(|p| (u, p))) {
+        Some((u, p)) => {
+            let dimension = p.dimension(&*host).map(|d| d.to_string()).unwrap_or_default();
+            let mode = match p.game_mode(&*host).map(|m| m.id()) {
+                Some(1) => "CREATIVE",
+                Some(2) => "ADVENTURE",
+                Some(3) => "SPECTATOR",
+                _ => "SURVIVAL",
+            };
+            let name = p.name(&*host).unwrap_or_default();
+            let ping = p.latency(&*host).unwrap_or(0) as i64;
+            let facts = bridge::alerts::PlayerFacts {
+                name: name.clone(),
+                uuid: bridge::server::uuid_string(u),
+                world: bridge::world_name(&dimension),
+                game_mode: mode.to_string(),
+                ping,
+            };
+            (Some(facts), ping, Some(bridge::server::Player { uuid: u, name, dimension }))
+        }
+        None => match uuid.and_then(|u| bridge::known_player(u).map(|k| (u, k))) {
+            // A player who just left: what the last snapshot knew.
+            Some((u, k)) => {
+                let facts = bridge::alerts::PlayerFacts {
+                    name: k.name.clone(),
+                    uuid: bridge::server::uuid_string(u),
+                    world: bridge::world_name(&k.dimension),
+                    game_mode: "SURVIVAL".to_string(),
+                    ping: 0,
+                };
+                (Some(facts), 0, Some(k))
+            }
+            None => (None, 0, None),
+        },
+    };
+    let online: Vec<String> = host
+        .players()
+        .server_players()
+        .into_iter()
+        .filter_map(|p| p.name(&*host))
+        .collect();
+    let cell = std::cell::RefCell::new(host);
+    let perm = |node: &str| uuid.is_some_and(|u| has_node(&mut **cell.borrow_mut(), u, node, 4));
+    let ev = bridge::alerts::Event { kind, player: facts.as_ref(), message, cancelled, online, has_permission: &perm };
+    bridge::alert_event(&ev, known, ping);
 }
 
 fn lock_set(set: &Mutex<BTreeSet<u128>>) -> std::sync::MutexGuard<'_, BTreeSet<u128>> {
@@ -381,6 +441,11 @@ impl Hooks for Mod {
             bridge::console_output(&command, result.success, result.feedback);
         }
         for (uuid, line) in work.kicks {
+            // The unlink kick has the link requirement's exceptions (whitelist, "only banned players").
+            let (whitelisted, banned) = login_facts(&*host, uuid);
+            if !bridge::unlink_kick_applies(whitelisted, banned) {
+                continue;
+            }
             if let Some(player) = host.player(uuid) {
                 let text = legacy(&*host, &line);
                 let _ = player.disconnect(host, text);
@@ -424,7 +489,8 @@ impl Hooks for Mod {
         // The bridge looks for the player's file to tell a first join.
         bridge::player_login(event.player);
         // `Require linked account to play` (linking.yml): an unlinked player is refused with the message.
-        if let Some(message) = bridge::login_refusal(event.player, event.name) {
+        let (whitelisted, banned) = if bridge::login_check_on() { login_facts(&*host, event.player) } else { (false, false) };
+        if let Some(message) = bridge::login_refusal(event.player, event.name, whitelisted, banned) {
             let text = bridge::format::translate_ampersand(&message);
             *event.reason = Some(legacy(&*host, &text));
             return Flow::Cancel;
@@ -445,6 +511,7 @@ impl Hooks for Mod {
         }
         bridge::minecraft_unban_on_join(event.player);
         bridge::player_join(event.player, &event.name, &message, silent);
+        alert(host, bridge::alerts::Kind::Join, Some(event.player), &message, false);
     }
 
     fn player_logged_out(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedOutEvent<'_>) {
@@ -455,6 +522,7 @@ impl Hooks for Mod {
         // discordsrv.silentquit, default nobody: the answer from login (the player is already gone here).
         let silent = lock_set(&self.silent_quit).remove(&event.player);
         bridge::player_leave(event.player, &event.name, &message, silent);
+        alert(host, bridge::alerts::Kind::Quit, Some(event.player), &message, false);
     }
 
     /// The death message the game built (killer, weapon and all), as DiscordSRV's
@@ -482,6 +550,7 @@ impl Hooks for Mod {
             return;
         };
         bridge::player_death(event.player, &name, &dimension, &message);
+        alert(host, bridge::alerts::Kind::Death, Some(event.player), &message, false);
     }
 
     /// `BanSynchronizationMinecraftToDiscord`: a player ban bans the linked Discord account.
@@ -506,6 +575,13 @@ impl Hooks for Mod {
             .map(|p| p.dimension)
             .unwrap_or_default();
         bridge::player_advancement(event.player, &event.name, &dimension, &title);
+        alert(host, bridge::alerts::Kind::Advancement, Some(event.player), &title, false);
+    }
+
+    /// `ServerCommandEvent` for alerts.yml: a line typed in the console, RCON or the Discord console channel.
+    fn console_command(&self, host: &mut dyn ServerHost, event: &mut ConsoleCommandEvent<'_>) -> Flow {
+        alert(host, bridge::alerts::Kind::ConsoleCommand, None, event.line, event.cancelled);
+        Flow::Continue
     }
 
     fn server_chat(&self, host: &mut dyn ServerHost, event: &mut ServerChatEvent<'_>) -> Flow {
@@ -514,6 +590,7 @@ impl Hooks for Mod {
         if !event.cancelled && has_node(&mut *host, event.player, "discordsrv.chat", 0) {
             bridge::player_chat(event.player, &event.username, &event.raw_text);
         }
+        alert(host, bridge::alerts::Kind::Chat, Some(event.player), &event.raw_text, event.cancelled);
         Flow::Continue
     }
 
@@ -522,6 +599,7 @@ impl Hooks for Mod {
         host: &mut dyn ServerHost,
         event: &mut PlayerCommandEvent<'_>,
     ) -> Flow {
+        alert(host, bridge::alerts::Kind::PlayerCommand, Some(event.player), event.command, event.cancelled);
         let mut words = event.command.splitn(2, ' ');
         let is_discord = words.next().is_some_and(|root| {
             root.eq_ignore_ascii_case("discord") || root.eq_ignore_ascii_case("discordsrv")

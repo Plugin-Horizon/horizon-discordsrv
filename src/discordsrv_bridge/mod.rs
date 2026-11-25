@@ -4,6 +4,7 @@
 //! canned responses, topics and channel names, the watchdog), account linking, and the bot's
 //! presence. Everything that touches the network runs on threads of its own; the server thread
 //! hands over its TPS, its players and the game's events, and takes queued commands and lines.
+pub mod alerts;
 pub mod chat;
 pub mod commands;
 pub mod config;
@@ -17,6 +18,7 @@ pub mod guild;
 pub mod linking;
 pub mod original;
 pub mod relay;
+pub mod requirelink;
 pub mod rest;
 pub mod server;
 pub mod sync;
@@ -81,6 +83,8 @@ pub struct Shared {
     state: Mutex<State>,
     jobs: Mutex<VecDeque<relay::Job>>,
     to_game: Mutex<TickWork>,
+    /// The parsed `Alerts` (alerts.yml).
+    alerts: Vec<alerts::Alert>,
 }
 
 /// What the gateway and the game told, guarded together.
@@ -354,8 +358,9 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
     let home = config_dir.parent().map(Path::to_path_buf).unwrap_or_default();
     let accounts_file = if config.chat.accounts_file.trim().is_empty() { "accounts.aof" } else { &config.chat.accounts_file };
     let accounts = linking::Accounts::load(dir.join(accounts_file));
+    let alert_list = build_alerts(&config);
     let shared = Arc::new(Shared {
-        rest: rest::Rest::new(&config.api_base_url, &token),
+        rest: rest::Rest::with_proxy(&config.api_base_url, &token, config.proxy().as_ref()),
         config,
         token,
         stop: AtomicBool::new(false),
@@ -384,6 +389,7 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
         }),
         jobs: Mutex::new(VecDeque::new()),
         to_game: Mutex::new(TickWork::default()),
+        alerts: alert_list,
     });
     let mut threads = Vec::new();
     {
@@ -478,27 +484,112 @@ pub fn player_login(uuid: u128) {
     }
 }
 
+/// The alerts of the config, with a line for each one that cannot work.
+fn build_alerts(config: &Config) -> Vec<alerts::Alert> {
+    let mut warnings = Vec::new();
+    let list = alerts::parse(&config.chat.alerts, &mut warnings);
+    for w in warnings {
+        log::warn!(target: "horizon_discordsrv", "[DiscordSRV] {w}");
+    }
+    if !list.is_empty() {
+        log::info!(target: "horizon_discordsrv", "[DiscordSRV] {} alert{} registered", list.len(), if list.len() == 1 { "" } else { "s" });
+    }
+    list
+}
+
+/// The Bukkit world name of a dimension (`world`, `world_nether`, `world_the_end`), for the alerts' `{world}`.
+pub fn world_name(dimension: &str) -> String {
+    shared().map(|sh| sh.server.world_name(dimension)).unwrap_or_else(|| dimension.to_string())
+}
+
+/// Whether any alert is configured (the glue builds an event only then).
+pub fn alerts_on() -> bool {
+    shared().is_some_and(|sh| !sh.alerts.is_empty())
+}
+
+/// A game event for the alerts: each alert it triggers has its conditions and `${...}` evaluated here, on
+/// the server thread (they may ask the game), and its message queued for the chat thread.
+pub fn alert_event(ev: &alerts::Event, player: Option<Player>, ping: i64) {
+    let Some(sh) = shared() else { return };
+    for alert in sh.alerts.iter().filter(|a| alerts::triggered(a, ev)) {
+        let mut log = Vec::new();
+        let template = alerts::prepare(alert, ev, &mut log);
+        for line in log {
+            log::error!(target: "horizon_discordsrv", "[DiscordSRV] {line}");
+        }
+        if let Some(template) = template {
+            sh.push_job(relay::Job::Alert { channels: alert.channels.clone(), template, player: player.clone(), ping });
+        }
+    }
+}
+
+/// Whether the login check is on (the glue then reads the whitelist and the ban list for it).
+pub fn login_check_on() -> bool {
+    shared().is_some_and(|sh| sh.config.chat.require_linked_account_to_play.enabled)
+}
+
 /// `Require linked account to play`: the kick text of a login that must be refused, None to let the
-/// player in. Bypass names and an off rule let everyone in; so does a player whose account is linked.
-pub fn login_refusal(uuid: u128, name: &str) -> Option<String> {
+/// player in. `whitelisted` and `banned` are the server's answers for the player (vanilla whitelist,
+/// name ban list). The rules and their order are [`requirelink::decide`]'s; the Discord questions
+/// (membership, roles) are asked of the REST API here, as DiscordSRV's `.complete()` calls are.
+pub fn login_refusal(uuid: u128, name: &str, whitelisted: bool, banned: bool) -> Option<String> {
     let sh = shared()?;
     let rule = &sh.config.chat.require_linked_account_to_play;
-    if !rule.enabled || rule.bypass_names.iter().any(|b| b.eq_ignore_ascii_case(name)) {
+    if !rule.enabled {
         return None;
     }
-    if !sh.ready.load(Ordering::Relaxed) {
-        let text = rule.messages.still_starting.as_str();
-        let text = if text.trim().is_empty() { STILL_STARTING } else { text };
-        return Some(text.to_string());
+    let bot_name = sh.lock_state().cache.bot_name.clone();
+    let facts = requirelink::Facts {
+        name,
+        whitelisted,
+        banned,
+        ready: sh.ready.load(Ordering::Relaxed),
+        bot_name: &bot_name,
+        invite: &sh.config.chat.discord_invite_link,
+    };
+    let mut live = LiveDiscord { sh: &sh, uuid, name };
+    let mut log = Vec::new();
+    let text = requirelink::decide(rule, &facts, &mut live, &mut log);
+    for line in log {
+        if line.starts_with("Failed to check player") || line.starts_with("Tried to authenticate") {
+            log::warn!(target: "horizon_discordsrv", "[DiscordSRV] {line}");
+        } else {
+            debugger::log("REQUIRE_LINK", &sh.config.chat.debug, &line);
+        }
     }
-    let mut st = sh.lock_state();
-    if st.accounts.discord_of(uuid).is_some() {
-        return None;
+    text
+}
+
+/// `noticePlayerUnlink`'s exceptions for a player who unlinked: false when the whitelist bypass holds
+/// or only banned players need to link and this one is not banned.
+pub fn unlink_kick_applies(whitelisted: bool, banned: bool) -> bool {
+    shared().is_some_and(|sh| requirelink::unlink_kick_applies(&sh.config.chat.require_linked_account_to_play, whitelisted, banned))
+}
+
+/// The Discord side of a login check, over the live link file, the guild cache and the REST API.
+struct LiveDiscord<'a> {
+    sh: &'a Shared,
+    uuid: u128,
+    name: &'a str,
+}
+
+impl requirelink::Discord for LiveDiscord<'_> {
+    fn linked(&mut self) -> Option<String> {
+        self.sh.lock_state().accounts.discord_of(self.uuid).map(|d| d.to_string())
     }
-    let code = st.accounts.new_code(uuid, name);
-    let template = rule.not_linked_message.as_str();
-    let template = if template.trim().is_empty() { NOT_LINKED } else { template };
-    Some(not_linked_text(template, &st.cache.bot_name, &code, &sh.config.chat.discord_invite_link))
+    fn new_code(&mut self) -> String {
+        self.sh.lock_state().accounts.new_code(self.uuid, self.name)
+    }
+    fn bot_guilds(&self) -> Vec<String> {
+        self.sh.lock_state().cache.guilds.keys().cloned().collect()
+    }
+    fn role_guild(&self, role: &str) -> Option<String> {
+        let st = self.sh.lock_state();
+        st.cache.guilds.values().find(|g| g.roles.contains_key(role)).map(|g| g.id.clone())
+    }
+    fn member_roles(&mut self, guild: &str, user: &str) -> Result<Option<Vec<String>>, String> {
+        self.sh.rest.member_roles(guild, user)
+    }
 }
 
 /// DiscordSRV's default kick texts (linking.yml, `&` codes).
@@ -667,6 +758,7 @@ impl Shared {
             }),
             jobs: Mutex::new(VecDeque::new()),
             to_game: Mutex::new(TickWork::default()),
+            alerts: Vec::new(),
         }
     }
 

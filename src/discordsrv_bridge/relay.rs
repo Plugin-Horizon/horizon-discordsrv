@@ -61,6 +61,9 @@ pub enum Job {
     Resync { players: std::collections::HashMap<u128, crate::discordsrv_bridge::sync::Groups> },
     /// A Discord account banned (`true`) or unbanned in the main guild.
     DiscordBan { discord: String, ban: bool },
+    /// An alert of alerts.yml whose conditions held: the message (its `${...}` already written in) goes to
+    /// each channel (a game channel name, a Discord channel name or ID).
+    Alert { channels: Vec<String>, template: crate::discordsrv_bridge::config::MessageTemplate, player: Option<Player>, ping: i64 },
 }
 
 fn no_mentions(content: &str) -> Value {
@@ -407,6 +410,69 @@ impl Shared {
         }
     }
 
+    /// Sends an alert: placeholders filled, the channel found as DiscordSRV looks for it (a game channel
+    /// of `Channels`, a Discord channel by name, then by ID), as a bot message or through a webhook.
+    fn run_alert(&self, channels: &[String], template: &crate::discordsrv_bridge::config::MessageTemplate, player: Option<&Player>, ping: i64) {
+        let c = &self.config.chat;
+        let (bot_name, bot_avatar) = {
+            let st = self.lock_state();
+            (st.cache.bot_name.clone(), st.cache.bot_avatar.clone())
+        };
+        let name = player.map(|p| strip_codes(&p.name)).unwrap_or_default();
+        let escaped = escape_markdown(&name);
+        let avatar = match player {
+            Some(p) => embed::avatar_url(&c.avatar_url, &name, p.uuid, 128),
+            None => bot_avatar.clone(),
+        };
+        let world = player.map(|p| self.server.world_name(&p.dimension)).unwrap_or_default();
+        let date = self.date_now();
+        let time = Local::now().format("%H:%M:%S").to_string();
+        let tps = format!("{:.2}", f32::from_bits(self.tps.load(Ordering::Relaxed)).min(20.0));
+        let ping = ping.to_string();
+        let pairs = [
+            ("name", name.as_str()),
+            ("displayname", &escaped),
+            ("username", &escaped),
+            ("usernamenoescapes", &name),
+            ("displaynamenoescapes", &name),
+            ("ping", &ping),
+            ("world", &world),
+            ("tps", &tps),
+            ("time", &time),
+            ("date", &date),
+            ("embedavatarurl", &avatar),
+            ("botavatarurl", &bot_avatar),
+            ("botname", &bot_name),
+        ];
+        let filled = crate::discordsrv_bridge::alerts::map_strings(template, &|s| crate::discordsrv_bridge::alerts::fill_braces(s, &pairs));
+        let Some(mut body) = embed::render(&filled, &pairs, Utc::now().timestamp()) else { return };
+        body["allowed_mentions"] = json!({ "parse": [] });
+        let hook = &filled.webhook;
+        for wanted in channels {
+            let id = c
+                .own_channel(wanted)
+                .map(str::to_string)
+                .or_else(|| self.lock_state().cache.find_channel(wanted).map(str::to_string))
+                .or_else(|| (!wanted.is_empty() && wanted.chars().all(|ch| ch.is_ascii_digit())).then(|| wanted.clone()));
+            let Some(id) = id else {
+                debugger::log("ALERTS", &c.debug, &format!("Not running alert: no target channel was found ({wanted})"));
+                continue;
+            };
+            if hook.enabled || hook.enable {
+                let name_pattern = if hook.name.trim().is_empty() { "%botname%" } else { hook.name.as_str() };
+                let avatar_pattern = if hook.avatar_url.trim().is_empty() { "%botavatarurl%" } else { hook.avatar_url.as_str() };
+                let mut hooked = body.clone();
+                hooked["username"] = json!(fill(name_pattern, &pairs).trim().chars().take(80).collect::<String>());
+                hooked["avatar_url"] = json!(fill(avatar_pattern, &pairs).trim());
+                if let Err(e) = self.rest.execute_webhook(&id, &hooked) {
+                    log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't send the alert as a webhook: {e}");
+                }
+            } else {
+                self.post_logged(&id, &body, "alert");
+            }
+        }
+    }
+
     fn run_job(&self, job: Job, expiring: &mut Vec<(Instant, String, String)>) {
         let c = &self.config.chat;
         match job {
@@ -475,6 +541,7 @@ impl Shared {
                     }
                 }
             }
+            Job::Alert { channels, template, player, ping } => self.run_alert(&channels, &template, player.as_ref(), ping),
             Job::GameChat { player, message } => {
                 let Some(channel) = c.channel_for("global") else { return };
                 let world = self.server.world_name(&player.dimension);

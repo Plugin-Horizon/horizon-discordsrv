@@ -4,10 +4,6 @@ version = "0.3.0"
 edition = "2024"
 publish = false
 
-[features]
-# Needs the engine branch rec-server-translate (ServerHost::translate): the server's own language for death and advancement texts.
-next-engine = []
-
 [dependencies]
 # The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command.
 horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }

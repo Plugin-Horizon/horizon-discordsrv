@@ -557,6 +557,9 @@ impl Shared {
         if c.discord_chat_channel_translate_mentions {
             text = chat::translate_mentions(c, &st.cache, &text);
         }
+        if c.reserializer_in_broadcast {
+            text = crate::discordsrv_bridge::format::legacy_to_markdown(&text);
+        }
         if let Some(channel) = target
             && !text.trim().is_empty()
         {

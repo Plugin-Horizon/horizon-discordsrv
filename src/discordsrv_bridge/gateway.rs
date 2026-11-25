@@ -124,7 +124,7 @@ pub fn run(shared: Arc<Shared>, on_dispatch: impl Fn(&str, &Value)) {
             },
         };
         let url = format!("{}/?v=10&encoding=json", url.trim_end_matches('/'));
-        let outcome = match ws::connect(&url) {
+        let outcome = match ws::connect(&url, shared.config.proxy().as_ref()) {
             Ok(conn) => connection(&shared, conn, &mut session, &on_dispatch),
             Err(e) => {
                 log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Gateway connection failed: {e}");

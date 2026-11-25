@@ -229,6 +229,7 @@ pub fn discord_to_minecraft(
     let message = truncate(&message, limit);
     let message = if strip { strip_codes(&message) } else { translate_ampersand(&message) };
     let message = convert_text(chat, cache, d, &message);
+    let message = if chat.reserializer_to_minecraft { crate::discordsrv_bridge::format::markdown_to_legacy(&message) } else { message };
     let hide_emoji = chat.discord_chat_channel_emoji_behavior.eq_ignore_ascii_case("hide");
     let message = if hide_emoji { message.chars().filter(|c| !is_emoji(*c)).collect::<String>() } else { message };
     if !message.trim().is_empty() {
@@ -311,7 +312,11 @@ pub struct GameChat<'a> {
 /// A player's chat message as the content of a Discord message, None when the prefix rule or a
 /// filter keeps it in the game.
 pub fn minecraft_to_discord(chat: &Chat, filters: &ChatFilters, cache: &Cache, m: &GameChat) -> Option<String> {
-    let message = strip_codes(m.message);
+    let message = if chat.reserializer_to_discord {
+        crate::discordsrv_bridge::format::legacy_to_markdown(m.message)
+    } else {
+        strip_codes(m.message)
+    };
     // As in DiscordSRV, an empty prefix with `PrefixActsAsBlacklist` keeps everything in the game.
     if message.starts_with(chat.discord_chat_channel_prefix_required_to_process_message.as_str())
         == chat.discord_chat_channel_prefix_acts_as_blacklist

@@ -108,6 +108,112 @@ fn is_code(c: char) -> bool {
     matches!(c.to_ascii_lowercase(), '0'..='9' | 'a'..='f' | 'k'..='o' | 'r')
 }
 
+/// Minecraft formatting codes (`§l`/`&l` and the rest) as Discord markdown, as MCDiscordReserializer's
+/// `DiscordSerializer` writes them: bold `**`, italic `*`, underline `__`, strikethrough `~~` around the
+/// text they cover. Colour codes (and `r`) end every open format, as in the game; obfuscation is dropped.
+/// A format's closing marker goes before the spaces that end the text, which Discord needs.
+pub fn legacy_to_markdown(text: &str) -> String {
+    const MARKERS: [(char, &str); 4] = [('l', "**"), ('o', "*"), ('n', "__"), ('m', "~~")];
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut open: Vec<&'static str> = Vec::new();
+    fn close_all(out: &mut String, open: &mut Vec<&'static str>) {
+        while let Some(marker) = open.pop() {
+            let kept = out.trim_end_matches(' ').len();
+            let spaces = out.split_off(kept);
+            out.push_str(marker);
+            out.push_str(&spaces);
+        }
+    }
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let coded = c == '§' || (c == '&' && chars.peek().is_some_and(|n| is_code(*n)));
+        if !coded {
+            out.push(c);
+            continue;
+        }
+        let Some(code) = chars.next().map(|d| d.to_ascii_lowercase()) else { break };
+        if let Some((_, marker)) = MARKERS.iter().find(|(k, _)| *k == code) {
+            if !open.contains(marker) {
+                out.push_str(marker);
+                open.push(marker);
+            }
+        } else if code == 'k' {
+            // Obfuscated text has no Discord form.
+        } else {
+            close_all(&mut out, &mut open);
+        }
+    }
+    close_all(&mut out, &mut open);
+    out
+}
+
+/// Discord markdown as Minecraft `§` codes (MCDiscordReserializer's `MinecraftSerializer`, for the four
+/// formats `Experiment_MCDiscordReserializer_ToMinecraft` names): `**` bold, `*` or `_` italic, `__`
+/// underline, `~~` strikethrough. A marker with no closing partner stays as written, a `_` inside a word
+/// is no marker, and `\*` is an escaped one. Closing a format resets and puts back the ones still open.
+pub fn markdown_to_legacy(text: &str) -> String {
+    const CODES: [(&'static str, char); 5] = [("**", 'l'), ("__", 'n'), ("~~", 'm'), ("*", 'o'), ("_", 'o')];
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut open: Vec<(&'static str, char)> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && chars.get(i + 1).is_some_and(|n| matches!(n, '*' | '_' | '~' | '\\')) {
+            out.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        let rest: String = chars[i..].iter().collect();
+        let Some((marker, code)) = CODES.iter().copied().find(|(m, _)| rest.starts_with(m)) else {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        };
+        let after = &rest[marker.len()..];
+        let word_char = |c: Option<char>| c.is_some_and(char::is_alphanumeric);
+        if let Some(at) = open.iter().position(|(m, _)| *m == marker) {
+            // Closing: an `_` closes only at a word end.
+            if marker == "_" && word_char(after.chars().next()) {
+                out.push(chars[i]);
+                i += 1;
+                continue;
+            }
+            open.remove(at);
+            out.push_str("§r");
+            for (_, c) in &open {
+                out.push('§');
+                out.push(*c);
+            }
+        } else {
+            // Opening: needs a closing partner later; an `_` opens only at a word start.
+            let boundary = marker != "_" || !word_char(i.checked_sub(1).and_then(|p| chars.get(p)).copied());
+            let partner = {
+                let mut from = 0;
+                let mut found = false;
+                while let Some(p) = after[from..].find(marker) {
+                    let tail = &after[from + p + marker.len()..];
+                    if marker != "_" || !word_char(tail.chars().next()) {
+                        found = true;
+                        break;
+                    }
+                    from += p + marker.len();
+                }
+                found
+            };
+            if !boundary || !partner || after.starts_with(' ') {
+                out.push_str(marker);
+                i += marker.len();
+                continue;
+            }
+            out.push('§');
+            out.push(code);
+            open.push((marker, code));
+        }
+        i += marker.chars().count();
+    }
+    out
+}
+
 /// `§x` and `&x` codes removed (text from Discord whose author may not use colours).
 pub fn strip_codes(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -168,6 +274,35 @@ pub fn truncate(text: &str, max: usize) -> String {
         return text.to_string();
     }
     text.chars().take(max).collect()
+}
+
+#[cfg(test)]
+mod reserializer_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_codes_become_markdown() {
+        assert_eq!(legacy_to_markdown("&lbold &r&aplain"), "**bold** plain");
+        // Both stay on until a colour or reset: underline is still open when the strike starts.
+        assert_eq!(legacy_to_markdown("§l§obold italic§r §nunder §mstrike"), "***bold italic*** __under ~~strike~~__");
+        assert_eq!(legacy_to_markdown("&kgone &cred"), "gone red");
+        assert_eq!(legacy_to_markdown("no codes & such"), "no codes & such");
+    }
+
+    #[test]
+    fn markdown_becomes_legacy_codes() {
+        assert_eq!(markdown_to_legacy("a **b** c"), "a §lb§r c");
+        assert_eq!(markdown_to_legacy("*i* __u__ ~~s~~ _j_"), "§oi§r §nu§r §ms§r §oj§r");
+        assert_eq!(markdown_to_legacy("**a *b* c**"), "§la §ob§r§l c§r");
+    }
+
+    #[test]
+    fn stray_and_escaped_markers_stay() {
+        assert_eq!(markdown_to_legacy("2 * 3 = 6"), "2 * 3 = 6");
+        assert_eq!(markdown_to_legacy("snake_case_name"), "snake_case_name");
+        assert_eq!(markdown_to_legacy("\\*not italic\\*"), "*not italic*");
+        assert_eq!(markdown_to_legacy("**open only"), "**open only");
+    }
 }
 
 #[cfg(test)]

@@ -42,9 +42,71 @@ pub struct Config {
     /// Discord's REST base. Set by `ApiBaseUrl` in the TOML file, or by the environment variable
     /// `HORIZON_DISCORDSRV_API_BASE` (test only, see README).
     pub api_base_url: String,
+    /// `ProxyHost`, `ProxyPort`, `ProxyUser`, `ProxyPassword`: the HTTP proxy for Discord's REST API and
+    /// gateway (see [`Config::proxy`]).
+    pub proxy_host: String,
+    pub proxy_port: u16,
+    pub proxy_user: String,
+    pub proxy_password: Secret,
     /// Chat channels, notifications, linking, watchdog (missing keys: off).
     #[serde(flatten)]
     pub chat: Chat,
+}
+
+/// A password: kept out of `Debug` output.
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() { "Secret(empty)" } else { "Secret(..)" })
+    }
+}
+
+/// The proxy of `ProxyHost` and its siblings.
+#[derive(Clone)]
+pub struct Proxy {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+}
+
+impl std::fmt::Debug for Proxy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Proxy({}:{})", self.host, self.port)
+    }
+}
+
+impl Proxy {
+    /// `Proxy-Authorization` for a CONNECT: Basic with the user and password, when a password is set
+    /// (DiscordSRV sends credentials only then).
+    pub fn authorization(&self) -> Option<String> {
+        use base64::Engine;
+        (!self.password.is_empty()).then(|| {
+            format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", self.user.trim(), self.password.trim())))
+        })
+    }
+
+    /// The `[user:password@]host:port` form `ureq` reads.
+    pub fn ureq_url(&self) -> String {
+        let auth = if self.password.is_empty() { String::new() } else { format!("{}:{}@", self.user.trim(), self.password.trim()) };
+        format!("{auth}{}:{}", self.host.trim(), self.port)
+    }
+}
+
+impl Config {
+    /// The proxy to use: a host that is set and is not the file's `example.com` placeholder.
+    pub fn proxy(&self) -> Option<Proxy> {
+        let host = self.proxy_host.trim();
+        (!host.is_empty() && host != "example.com" && self.proxy_port != 0).then(|| Proxy {
+            host: host.to_string(),
+            port: self.proxy_port,
+            user: self.proxy_user.clone(),
+            password: self.proxy_password.0.clone(),
+        })
+    }
 }
 
 /// The keys of the chat channel side. `Default` is everything off: a missing key never turns a
@@ -91,12 +153,27 @@ pub struct Chat {
     pub discord_chat_channel_roles_allowed_to_use_color_codes_in_chat: Vec<String>,
     pub discord_chat_channel_broadcast_discord_messages_to_console: bool,
     pub discord_chat_channel_require_linked_account: bool,
-    /// `Require linked account to play` (linking.yml): logins need a linked account. Its
-    /// membership, subscriber, whitelist and ban checks are not ported (see the README).
+    /// `Require linked account to play` (linking.yml): logins need a linked account, and may need
+    /// membership of the Discord server, a subscriber role, with the whitelist and ban rules.
+    /// IP bans are not read: the login hook has no address (see the README).
     #[serde(rename = "Require linked account to play")]
     pub require_linked_account_to_play: RequireLinked,
     pub discord_chat_channel_block_bots: bool,
     pub discord_chat_channel_block_webhooks: bool,
+    /// `Experiment_MCDiscordReserializer_ToDiscord`: formatting codes in game chat become Discord markdown
+    /// (bold, italic, underline, strikethrough) instead of being stripped.
+    #[serde(rename = "Experiment_MCDiscordReserializer_ToDiscord")]
+    pub reserializer_to_discord: bool,
+    /// `Experiment_MCDiscordReserializer_ToMinecraft`: those four markdown formats in Discord messages
+    /// become formatting codes in the game.
+    #[serde(rename = "Experiment_MCDiscordReserializer_ToMinecraft")]
+    pub reserializer_to_minecraft: bool,
+    /// `Experiment_MCDiscordReserializer_InBroadcast`: `/discord broadcast` turns codes into markdown.
+    #[serde(rename = "Experiment_MCDiscordReserializer_InBroadcast")]
+    pub reserializer_in_broadcast: bool,
+    /// alerts.yml: the `Alerts` list, read by [`crate::discordsrv_bridge::alerts::parse`].
+    #[serde(rename = "Alerts")]
+    pub alerts: Vec<serde_json::Value>,
     /// synchronization.yml: group name -> role ID (all-zero IDs and empty names are skipped).
     pub group_role_synchronization_groups_and_roles_to_sync: HashMap<String, String>,
     #[serde(default = "yes")]
@@ -249,8 +326,43 @@ pub struct RequireLinked {
     /// Kick text of a player without a link (`{BOT}`, `{CODE}`, `{INVITE}`, `&` codes); empty: the default.
     #[serde(rename = "Not linked message")]
     pub not_linked_message: String,
+    /// `Listener priority` and `Listener event`: which Bukkit event DiscordSRV checks on. Horizon has
+    /// one login hook, so both are read and have no effect.
+    #[serde(rename = "Listener priority")]
+    pub listener_priority: String,
+    #[serde(rename = "Listener event")]
+    pub listener_event: String,
+    /// Players on the vanilla whitelist skip the check (default true when the key is missing).
+    #[serde(rename = "Whitelisted players bypass check")]
+    pub whitelisted_players_bypass_check: Option<bool>,
+    /// Banned players are checked too (default: they skip it).
+    #[serde(rename = "Check banned players")]
+    pub check_banned_players: bool,
+    /// Only banned players need to link.
+    #[serde(rename = "Only check banned players")]
+    pub only_check_banned_players: bool,
+    /// `true`/`false`: in at least one Discord server the bot is in; a server ID; or a list of IDs
+    /// (all of them). Missing: `true`, as in DiscordSRV's file.
+    #[serde(rename = "Must be in Discord server")]
+    pub must_be_in_discord_server: serde_json::Value,
+    #[serde(rename = "Subscriber role")]
+    pub subscriber_role: SubscriberRole,
     #[serde(rename = "Messages")]
     pub messages: RequireLinkedMessages,
+}
+
+/// `Require linked account to play.Subscriber role`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct SubscriberRole {
+    #[serde(rename = "Require subscriber role to join")]
+    pub required: bool,
+    #[serde(rename = "Subscriber roles")]
+    pub roles: Vec<String>,
+    #[serde(rename = "Require all of the listed roles")]
+    pub require_all: bool,
+    #[serde(rename = "Kick message")]
+    pub kick_message: String,
 }
 
 /// `Require linked account to play.Messages.Kicked for unlinking`, English default.
@@ -266,6 +378,12 @@ pub struct RequireLinkedMessages {
     /// Kick text of a player who unlinks while linking is required; empty: the default.
     #[serde(rename = "Kicked for unlinking")]
     pub kicked_for_unlinking: String,
+    #[serde(rename = "Not in server")]
+    pub not_in_server: String,
+    #[serde(rename = "Failed to find subscriber role")]
+    pub failed_to_find_subscriber_role: String,
+    #[serde(rename = "Failed for unknown reason")]
+    pub failed_for_unknown_reason: String,
 }
 
 /// One `ChannelUpdater` entry: a channel whose name shows server information.
@@ -416,6 +534,10 @@ impl Default for Config {
             status_update_rate_in_minutes: 2,
             discord_console_channel_padding: 0,
             api_base_url: "https://discord.com/api/v10".into(),
+            proxy_host: String::new(),
+            proxy_port: 0,
+            proxy_user: String::new(),
+            proxy_password: Secret::default(),
             chat: Chat::default(),
         }
     }
@@ -477,6 +599,25 @@ mod tests {
         assert!(c.minecraft_player_join_message.webhook.enable);
         assert!(!c.minecraft_player_join_message.webhook.enabled);
         assert_eq!(c.minecraft_player_join_message.webhook.name, "Server");
+    }
+
+    #[test]
+    fn the_proxy_is_off_for_the_placeholder_and_never_printed() {
+        let mut c = Config::default();
+        assert!(c.proxy().is_none());
+        c.proxy_host = "example.com".into();
+        c.proxy_port = 1234;
+        assert!(c.proxy().is_none(), "the file's placeholder host is no proxy");
+        c.proxy_host = "proxy.internal".into();
+        c.proxy_user = "u".into();
+        c.proxy_password = Secret("hunter2pw".into());
+        let p = c.proxy().unwrap();
+        assert_eq!(p.ureq_url(), "u:hunter2pw@proxy.internal:1234");
+        assert_eq!(p.authorization().as_deref(), Some("Basic dTpodW50ZXIycHc="));
+        assert!(!format!("{c:?}{p:?}").contains("hunter2pw"));
+        c.proxy_password = Secret::default();
+        assert_eq!(c.proxy().unwrap().ureq_url(), "proxy.internal:1234");
+        assert_eq!(c.proxy().unwrap().authorization(), None);
     }
 
     #[test]

@@ -1,5 +1,7 @@
 # hmod port: discordsrv
 Parity: 80% now / 81% with our PRs / 81% with engine changes / 81% with new SDK (172/215 items now; 174/215 once the Nobody PR #18754 is in, which is the only item that moves in the later steps; the others gain nothing from engine work in the queues)
+Round 4 (2026-11-25, blind, not compiled): `alerts.rs` (alerts.yml), `requirelink.rs` (the login checks), reserializer in `format.rs`, the proxy (`config::Proxy`, `rest::with_proxy`, `ws::tunnel`). The `next-engine` feature is gone (`host.translate` is normal code). New unit tests cover the expression language, the check order, markdown both ways and a CONNECT tunnel on a local socket.
+
 Method: 10 commands + 21 nodes + 167 config keys + 17 features = 215 items; blocked-by-API counts as not done. Round 4 counted +5 webhook keys, +2 webhook features (chat, notices), +4 linking keys (enabled, bypass names, not linked message, still starting).
 Round 1
 - Fixed:

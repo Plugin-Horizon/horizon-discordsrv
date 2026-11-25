@@ -96,18 +96,9 @@ fn is_real_id(id: &str) -> bool {
 fn unported(root: &Map<String, Value>) -> Vec<&'static str> {
     let on = |k: &str| root.get(k).and_then(Value::as_bool) == Some(true);
     let mut out = Vec::new();
-    // A section, not a switch: `Enabled` inside it. Ported: the login refusal, bypass names and the
-    // kick texts. Not ported: the membership, subscriber role, vanilla whitelist and ban checks.
-    let linking = root.get("Require linked account to play").and_then(|v| v.get("Enabled")).and_then(Value::as_bool);
-    if linking == Some(true) {
-        out.push("linking.yml: require linked account to play (membership, subscriber, whitelist and ban checks)");
-    }
-    if on("NicknameSynchronizationEnabled") {
-        out.push("synchronization.yml: nickname synchronisation");
-    }
-    if on("BanSynchronizationDiscordToMinecraft") || on("BanSynchronizationMinecraftToDiscord") {
-        out.push("synchronization.yml: ban synchronisation");
-    }
+    // Ported: the login requirement with its membership, subscriber, whitelist and name-ban checks,
+    // nickname and ban synchronisation, alerts. Only the Discord -> Minecraft part of the group
+    // synchronisation and voice are left.
     if root
         .get("GroupRoleSynchronizationGroupsAndRolesToSync")
         .and_then(Value::as_object)
@@ -117,9 +108,6 @@ fn unported(root: &Map<String, Value>) -> Vec<&'static str> {
     }
     if on("Voice enabled") {
         out.push("voice.yml: voice");
-    }
-    if root.get("Alerts").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) {
-        out.push("alerts.yml: alerts");
     }
     out
 }
