@@ -4,11 +4,6 @@ version = "0.3.0"
 edition = "2024"
 publish = false
 
-[features]
-# Off by default: the engine's `NodeDefault::Nobody` (horizon-rust/horizon PR #18754, not in the pin).
-# With it, `discordsrv.silentjoin` and `discordsrv.silentquit` default to nobody, as in DiscordSRV.
-horizon_perm_nobody = []
-
 [dependencies]
 # The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command.
 horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }

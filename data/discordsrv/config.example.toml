@@ -188,6 +188,19 @@ MinecraftNobodyFound = "&cNobody found with Discord ID/Discord name/Minecraft na
 # death: %deathmessage% %world%; advancement: %achievement% %world%.
 # Embed Fields entries are "title;value;inline" or "blank"; Timestamp is true or an epoch second.
 
+# Group -> role synchronisation (synchronization.yml). Minecraft is authoritative: the Discord roles
+# follow the groups a permission mod publishes (a role ID of only zeros is skipped). Discord -> Minecraft
+# group changes are not possible from a mod.
+GroupRoleSynchronizationGroupsAndRolesToSync = {}
+GroupRoleSynchronizationMinecraftIsAuthoritative = true
+GroupRoleSynchronizationOneWay = false
+GroupRoleSynchronizationPrimaryGroupOnly = false
+GroupRoleSynchronizationOnLink = true
+GroupRoleSynchronizationCycleTime = 5
+# Ban synchronisation. The Discord -> Minecraft reason takes & colour codes (stripped for the ban list).
+BanSynchronizationDiscordToMinecraft = false
+BanSynchronizationMinecraftToDiscord = false
+
 [MinecraftPlayerJoinMessage]
 Enabled = true
 Content = ""
@@ -235,6 +248,7 @@ Timestamp = false
 
 # Require linked account to play (linking.yml). Off: anyone may log in. On: an unlinked player is
 # refused with the kick text; {BOT}, {CODE} and {INVITE} are filled in. Empty texts use the defaults.
+# A player who unlinks is kicked with "Kicked for unlinking" (default text when empty).
 # The membership, subscriber role, whitelist and ban checks of DiscordSRV are not ported.
 ["Require linked account to play"]
 Enabled = false
@@ -243,3 +257,4 @@ Enabled = false
 
 ["Require linked account to play".Messages]
 "DiscordSRV still starting" = ""
+"Kicked for unlinking" = ""

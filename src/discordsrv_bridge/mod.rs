@@ -19,11 +19,12 @@ pub mod original;
 pub mod relay;
 pub mod rest;
 pub mod server;
+pub mod sync;
 pub mod ws;
 pub mod yaml;
 
 use std::path::PathBuf;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -107,6 +108,12 @@ pub struct TickWork {
     /// Names of the players a Discord message mentioned as `@name` (`MinecraftMentionSound`): they
     /// hear the note-block pling.
     pub mentions: Vec<String>,
+    /// Players to kick, with the `§`-coded text: they unlinked while linking is required.
+    pub kicks: Vec<(u128, String)>,
+    /// A `/discord resync`, a new link or the cycle timer wants the groups of these players
+    /// (every linked player when `resync_all`).
+    pub resync: Vec<u128>,
+    pub resync_all: bool,
 }
 
 /// The players of `names` that `message` mentions as `@name`, as `PlayerUtil.notifyPlayersOfMentions`
@@ -436,6 +443,11 @@ pub fn tick(tps: f32, players: impl FnOnce() -> Vec<Player>) -> TickWork {
             }
         }
     }
+    if sh.sync_enabled() && sync::cycle_due(sh.config.chat.group_role_synchronization_cycle_time.max(1)) {
+        // GroupRoleSynchronizationCycleTime: the players on the server (not everyone linked).
+        let online: Vec<u128> = sh.lock_state().players.iter().map(|p| p.uuid).collect();
+        work.resync.extend(online);
+    }
     work.commands.extend(sh.commands.lock().map(|mut q| q.drain(..).collect::<Vec<_>>()).unwrap_or_default());
     work.console.extend(sh.console_queue.lock().map(|mut q| q.drain(..).collect::<Vec<_>>()).unwrap_or_default());
     work
@@ -528,6 +540,37 @@ pub fn player_join(uuid: u128, name: &str, message: &str, silent: bool) {
 pub fn player_leave(uuid: u128, name: &str, message: &str, silent: bool) {
     if let Some(sh) = shared() {
         sh.join_notice_leave(uuid, name, message, silent);
+    }
+}
+
+/// The groups of players for the synchronisation (`TickWork::resync`), read on the server thread:
+/// the Discord roles are changed on the chat thread.
+pub fn resync(players: HashMap<u128, sync::Groups>) {
+    if let Some(sh) = shared() {
+        sh.push_job(relay::Job::Resync { players });
+    }
+}
+
+/// The UUIDs of every linked player (for `/discord resync`).
+pub fn linked_uuids() -> Vec<u128> {
+    shared().map(|sh| sh.linked_uuids()).unwrap_or_default()
+}
+
+/// A player was banned or pardoned on the server (`BanSynchronizationMinecraftToDiscord`): a ban
+/// bans their linked Discord account.
+pub fn minecraft_ban(uuid: u128, banned: bool) {
+    if let Some(sh) = shared()
+        && banned
+    {
+        sh.minecraft_ban(uuid);
+    }
+}
+
+/// A player joined, so no ban stands on the server: the linked Discord account is unbanned
+/// (`PlayerBanListener.onPlayerJoin`).
+pub fn minecraft_unban_on_join(uuid: u128) {
+    if let Some(sh) = shared() {
+        sh.minecraft_unban(uuid);
     }
 }
 

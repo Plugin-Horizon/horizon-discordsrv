@@ -57,6 +57,10 @@ pub enum Job {
     Delete { channel: String, message: String, after: Duration },
     /// Reactions added to a message, in this order.
     React { channel: String, message: String, emoji: Vec<&'static str> },
+    /// Group -> role synchronisation of these players (groups read by the server thread).
+    Resync { players: std::collections::HashMap<u128, crate::discordsrv_bridge::sync::Groups> },
+    /// A Discord account banned (`true`) or unbanned in the main guild.
+    DiscordBan { discord: String, ban: bool },
 }
 
 fn no_mentions(content: &str) -> Value {
@@ -68,6 +72,10 @@ impl Shared {
     pub(crate) fn dispatch(&self, event: &str, d: &Value) {
         let mut st = self.lock_state();
         st.cache.apply(event, d);
+        if event == "GUILD_BAN_ADD" || event == "GUILD_BAN_REMOVE" {
+            self.discord_ban(&st, event == "GUILD_BAN_ADD", d);
+            return;
+        }
         if event != "MESSAGE_CREATE" {
             return;
         }
@@ -518,7 +526,32 @@ impl Shared {
                     }
                 }
             }
+            Job::Resync { players } => {
+                let changed = self.resync_players(&players);
+                log::info!(target: "horizon_discordsrv", "[DiscordSRV] Group synchronization finished: {} players, {changed} changed", players.len());
+            }
+            Job::DiscordBan { discord, ban } => {
+                let guild = {
+                    let st = self.lock_state();
+                    self.config.chat.channel_for("global").and_then(|ch| st.cache.guild_of_channel(ch)).map(|g| g.id.clone())
+                };
+                if let Some(guild) = guild {
+                    let result = if ban {
+                        self.rest.ban_member(&guild, &discord)
+                    } else {
+                        self.rest.unban_member(&guild, &discord)
+                    };
+                    match result {
+                        Ok(()) if ban => log::info!(target: "horizon_discordsrv", "[DiscordSRV] Banned a linked Discord account because the player is banned on the server"),
+                        Ok(()) => log::info!(target: "horizon_discordsrv", "[DiscordSRV] Unbanned a linked Discord account because the player is not banned on the server"),
+                        Err(e) => log::debug!(target: "horizon_discordsrv", "[DiscordSRV] Ban synchronization: {e}"),
+                    }
+                }
+            }
             Job::Linked { discord, discord_name, uuid, name } => {
+                if c.group_role_synchronization_on_link && self.sync_enabled() {
+                    self.to_game.lock().unwrap_or_else(|e| e.into_inner()).resync.push(uuid);
+                }
                 self.role(&discord, true);
                 self.link_commands(&c.minecraft_discord_account_linked_console_commands, &discord, &discord_name, uuid, &name);
             }
@@ -565,6 +598,47 @@ impl Shared {
         });
         if let Err(e) = self.rest.execute_webhook(channel, &body) {
             log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't send the chat message as a webhook: {e}");
+        }
+    }
+
+    /// `DiscordBanListener`: a Discord ban of a linked account bans the player on the server, an unban
+    /// pardons them (`BanSynchronizationDiscordToMinecraft`). The commands run on the server thread.
+    fn discord_ban(&self, st: &State, banned: bool, d: &Value) {
+        let c = &self.config.chat;
+        if !c.ban_synchronization_discord_to_minecraft {
+            return;
+        }
+        let Some(user) = d["user"]["id"].as_str() else { return };
+        let Some(uuid) = st.accounts.uuid_of(user) else { return };
+        let Some(name) = crate::discordsrv_bridge::commands::known_name(st, &self.server, uuid) else { return };
+        let command = if banned {
+            let reason = crate::discordsrv_bridge::console::strip_colors(&crate::discordsrv_bridge::format::translate_ampersand(
+                &c.ban_synchronization_discord_to_minecraft_reason,
+            ));
+            format!("ban {name} {reason}")
+        } else {
+            format!("pardon {name}")
+        };
+        self.commands.lock().unwrap_or_else(|e| e.into_inner()).push_back(command);
+    }
+
+    /// `BanSynchronizationMinecraftToDiscord`: the linked account of a banned player is banned.
+    pub(crate) fn minecraft_ban(&self, uuid: u128) {
+        if !self.config.chat.ban_synchronization_minecraft_to_discord {
+            return;
+        }
+        if let Some(discord) = self.lock_state().accounts.discord_of(uuid).map(str::to_string) {
+            self.push_job(Job::DiscordBan { discord, ban: true });
+        }
+    }
+
+    /// A player who can join is not banned on the server: their Discord ban is lifted.
+    pub(crate) fn minecraft_unban(&self, uuid: u128) {
+        if !self.config.chat.ban_synchronization_minecraft_to_discord {
+            return;
+        }
+        if let Some(discord) = self.lock_state().accounts.discord_of(uuid).map(str::to_string) {
+            self.push_job(Job::DiscordBan { discord, ban: false });
         }
     }
 

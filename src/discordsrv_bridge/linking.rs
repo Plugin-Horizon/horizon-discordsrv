@@ -121,6 +121,11 @@ impl Accounts {
         self.save()
     }
 
+    /// The UUID of every linked player.
+    pub fn all_uuids(&self) -> Vec<u128> {
+        self.links.values().copied().collect()
+    }
+
     /// Unlinks a player; their Discord ID when they were linked.
     pub fn unlink(&mut self, uuid: u128) -> Result<Option<String>, String> {
         let Some(id) = self.discord_of(uuid).map(str::to_string) else {

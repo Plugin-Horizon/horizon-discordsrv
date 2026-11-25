@@ -138,6 +138,27 @@ impl Rest {
         self.call("DELETE", &format!("/guilds/{guild}/members/{user}/roles/{role}"), None).map(drop)
     }
 
+    /// The role IDs of a guild member; `None` when the user is not in the guild.
+    pub fn member_roles(&self, guild: &str, user: &str) -> Result<Option<Vec<String>>, String> {
+        match self.call("GET", &format!("/guilds/{guild}/members/{user}"), None) {
+            Ok(v) => Ok(Some(
+                v["roles"].as_array().map(|r| r.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+            )),
+            Err(e) if e.contains("HTTP 404") => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Bans a Discord user from the guild (`DiscordUtil.banMember`); no messages are deleted.
+    pub fn ban_member(&self, guild: &str, user: &str) -> Result<(), String> {
+        self.call("PUT", &format!("/guilds/{guild}/bans/{user}"), Some(json!({ "delete_message_seconds": 0 }))).map(drop)
+    }
+
+    /// Takes a Discord user's ban back; an error (404) when they were not banned.
+    pub fn unban_member(&self, guild: &str, user: &str) -> Result<(), String> {
+        self.call("DELETE", &format!("/guilds/{guild}/bans/{user}"), None).map(drop)
+    }
+
     /// One request; a 429 waits its `retry_after` and tries again (three times at most), a 5xx
     /// once after a second.
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {

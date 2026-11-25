@@ -14,9 +14,9 @@ use tungstenite::protocol::frame::coding::CloseCode;
 use crate::discordsrv_bridge::Shared;
 use crate::discordsrv_bridge::ws::{self, Connection};
 
-/// GUILDS, GUILD_MESSAGES, DIRECT_MESSAGES (link codes) and MESSAGE_CONTENT (privileged: turn
+/// GUILDS, GUILD_MODERATION (ban synchronisation), GUILD_MESSAGES, DIRECT_MESSAGES (link codes) and MESSAGE_CONTENT (privileged: turn
 /// it on for the bot). Not the privileged GUILD_MEMBERS: members are learned from messages.
-pub const INTENTS: u64 = 1 | (1 << 9) | (1 << 12) | (1 << 15);
+pub const INTENTS: u64 = 1 | (1 << 2) | (1 << 9) | (1 << 12) | (1 << 15);
 
 /// A message posted in the console channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,6 +341,6 @@ mod tests {
 
     #[test]
     fn intents_are_guilds_messages_pms_and_content() {
-        assert_eq!(INTENTS, 37377);
+        assert_eq!(INTENTS, 37381);
     }
 }

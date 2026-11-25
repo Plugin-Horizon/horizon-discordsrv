@@ -31,7 +31,7 @@ use discordsrv_bridge as bridge;
 use mod_api::{
     Command, CommandArgumentValue, CommandSource, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
     NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode, PermissionValueType,
-    PlayerAdvancementDoneEvent, PlayerCommandEvent, PlayerDiedEvent, PlayerLoggedInEvent,
+    BanChangedEvent, BanListKind, PlayerAdvancementDoneEvent, PlayerCommandEvent, PlayerDeathMessageEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, PlayerLoginEvent, Identifier, RegisterNodeCommandsEvent, RegisterConfigsEvent,
     RunModCommandEvent, ServerAboutToStartEvent, ServerChatEvent, ServerHost, ServerStoppingEvent, ServerTickEvent,
     ServerTickPhase, Text,
@@ -65,9 +65,9 @@ fn legacy(host: &dyn ServerHost, line: &str) -> Text {
 }
 
 /// The English line of a vanilla message the bridge takes as plain text.
-/// TODO(arismoko-api: text_plain): `Text::translate(key).plain()` would give the server language's
-/// text for any key; until then only these keys have a line, and a server in another language gets
-/// English here.
+/// NOTE: `Text::plain` has no language file, so keys come from the embedded en_us table
+/// (`data/discordsrv/en_us_subset.json`: every `death.*`, `entity.minecraft.*`, `item.minecraft.*`,
+/// `block.minecraft.*` and advancement title); a server in another language gets English here.
 fn vanilla_line(key: &str, name: &str) -> Option<String> {
     let text = match key {
         "multiplayer.player.joined" => "{name} joined the game",
@@ -137,11 +137,11 @@ fn plain_text(text: &Text) -> String {
     out
 }
 
+#[allow(dead_code)]
 /// The death line: the cause's key when it has a line, else the generic one.
 /// The English texts are vanilla's `en_us` lines for the keys listed in [`vanilla_line`]. A key
 /// without a line (the killer's kinds, `death.attack.player` and friends) falls back to the generic line.
-/// TODO(arismoko-api: player_died_v2): the killer's and item's names are not known here, so
-/// `death.attack.player` and friends fall back to the generic line.
+/// Only used for a death without a built message; the real line comes from `player_death_message`.
 fn death_line(cause: Option<&str>, name: &str) -> String {
     cause
         .and_then(|key| vanilla_line(key, name))
@@ -149,9 +149,7 @@ fn death_line(cause: Option<&str>, name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The level of a node that nobody has by default (DiscordSRV's `default: false`). Without the
-/// engine's `NodeDefault::Nobody` (feature `horizon_perm_nobody`) it is declared at level 5, the
-/// owner level.
+/// The level of a node that nobody has by default (DiscordSRV's `default: false`).
 const NOBODY: u8 = u8::MAX;
 
 /// Every permission node the bridge asks, with the operator level it defaults to (0: everyone, 2:
@@ -179,21 +177,13 @@ const NODES: [(&str, u8); 19] = [
     ("discordsrv.groupsyncwithcommands", 2),
 ];
 
-/// The default of a declared node: its operator level, or nobody (`NOBODY`).
-#[cfg(feature = "horizon_perm_nobody")]
+/// The default of a declared node: its operator level, or nobody (`NOBODY`, Bukkit's `default: false`).
 fn node_default(level: u8) -> NodeDefault {
     if level == NOBODY {
         NodeDefault::Nobody
     } else {
         NodeDefault::Level(PermissionLevel::from_level(i32::from(level)))
     }
-}
-
-/// The same without `NodeDefault::Nobody`: a nobody node is declared at level 5 (the owner level),
-/// so an operator (level 4) is not silent by default.
-#[cfg(not(feature = "horizon_perm_nobody"))]
-fn node_default(level: u8) -> NodeDefault {
-    NodeDefault::Level(PermissionLevel::from_level(i32::from(level.min(5))))
 }
 
 /// A Boolean permission node named `name`.
@@ -345,6 +335,24 @@ impl Hooks for Mod {
             let result = host.commands().run_command_with_output(&command);
             bridge::console_output(&command, result.success, result.feedback);
         }
+        for (uuid, line) in work.kicks {
+            if let Some(player) = host.player(uuid) {
+                let text = legacy(&*host, &line);
+                let _ = host.player_disconnect(player, text);
+            }
+        }
+        if work.resync_all || !work.resync.is_empty() {
+            // Group -> role synchronisation: the groups are read here, the Discord calls run on the chat thread.
+            let uuids = if work.resync_all { bridge::linked_uuids() } else { work.resync.clone() };
+            let players = uuids
+                .into_iter()
+                .map(|uuid| {
+                    let g = host.permission_groups(uuid);
+                    (uuid, bridge::sync::Groups { all: g.groups, primary: g.primary })
+                })
+                .collect();
+            bridge::resync(players);
+        }
         for name in work.mentions {
             // MinecraftMentionSound: the note-block pling, to the mentioned player only.
             host.commands().run_command(&format!("playsound minecraft:block.note_block.pling master {name} ~ ~ ~ 1 1"));
@@ -390,6 +398,7 @@ impl Hooks for Mod {
         if has_node(&mut *host, event.player, "discordsrv.silentquit", NOBODY) {
             lock_set(&self.silent_quit).insert(event.player);
         }
+        bridge::minecraft_unban_on_join(event.player);
         bridge::player_join(event.player, &event.name, &message, silent);
     }
 
@@ -403,8 +412,17 @@ impl Hooks for Mod {
         bridge::player_leave(event.player, &event.name, &message, silent);
     }
 
-    fn player_died(&self, host: &mut dyn ServerHost, event: &mut PlayerDiedEvent<'_>) {
+    /// The death message the game built (killer, weapon and all), as DiscordSRV's
+    /// `PlayerDeathEvent#getDeathMessage`: a death without a message (none shown) is not announced.
+    fn player_death_message(&self, host: &mut dyn ServerHost, event: &mut PlayerDeathMessageEvent<'_>) {
         if bridge::is_fake(event.player) {
+            return;
+        }
+        let Some(text) = event.message.as_ref() else {
+            return;
+        };
+        let message = plain_text(text);
+        if message.trim().is_empty() {
             return;
         }
         let live = host.player(event.player).and_then(|p| {
@@ -417,8 +435,16 @@ impl Hooks for Mod {
         let Some((name, dimension)) = known else {
             return;
         };
-        let message = death_line(event.cause.as_deref(), &name);
         bridge::player_death(event.player, &name, &dimension, &message);
+    }
+
+    /// `BanSynchronizationMinecraftToDiscord`: a player ban bans the linked Discord account.
+    fn ban_changed(&self, _: &mut dyn ServerHost, event: &mut BanChangedEvent) {
+        if event.kind == BanListKind::Players
+            && let Some(uuid) = event.record.uuid
+        {
+            bridge::minecraft_ban(uuid, event.added);
+        }
     }
 
     fn player_advancement_done(
@@ -496,6 +522,38 @@ impl Hooks for Mod {
         for (name, level) in NODES {
             let _ = event.nodes.add(node(name), node_default(level));
         }
+        // plugin.yml's parent nodes: `discordsrv.player` (default true) and `discordsrv.admin` (op).
+        let kids = |names: &[&str]| names.iter().map(|n| node(n)).collect::<Vec<_>>();
+        let _ = event.nodes.add_with_children(
+            node("discordsrv.player"),
+            node_default(0),
+            &kids(&[
+                "discordsrv.chat",
+                "discordsrv.help",
+                "discordsrv.link",
+                "discordsrv.linked",
+                "discordsrv.discord",
+                "discordsrv.nicknamesync",
+            ]),
+        );
+        let _ = event.nodes.add_with_children(
+            node("discordsrv.admin"),
+            node_default(2),
+            &kids(&[
+                "discordsrv.player",
+                "discordsrv.updatenotification",
+                "discordsrv.bcast",
+                "discordsrv.reload",
+                "discordsrv.debug",
+                "discordsrv.link.others",
+                "discordsrv.linked.others",
+                "discordsrv.unlink",
+                "discordsrv.unlink.others",
+                "discordsrv.resync",
+                "discordsrv.groupsyncwithcommands",
+                "discordsrv.language",
+            ]),
+        );
     }
 
     fn register_node_commands(&self, _: &mut dyn ServerHost, event: &mut RegisterNodeCommandsEvent<'_>) {
@@ -558,6 +616,20 @@ mod tests {
     fn other_death_keys_come_from_the_lang_table() {
         assert_eq!(death_line(Some("death.attack.cramming"), "Tester"), "Tester was squished too much");
         assert_eq!(death_line(Some("death.attack.mob"), "Tester"), "Tester died");
+    }
+
+    #[test]
+    fn a_killer_and_a_weapon_are_named_in_the_death_line() {
+        let by_mob = Text::translate(
+            "death.attack.mob",
+            vec![Text::literal("Tester"), Text::translate("entity.minecraft.zombie", vec![])],
+        );
+        assert_eq!(plain_text(&by_mob), "Tester was slain by Zombie");
+        let by_item = Text::translate(
+            "death.attack.player.item",
+            vec![Text::literal("Tester"), Text::literal("Other"), Text::literal("[Diamond Sword]")],
+        );
+        assert_eq!(plain_text(&by_item), "Tester was slain by Other using [Diamond Sword]");
     }
 
     #[test]

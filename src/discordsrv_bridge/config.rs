@@ -97,6 +97,21 @@ pub struct Chat {
     pub require_linked_account_to_play: RequireLinked,
     pub discord_chat_channel_block_bots: bool,
     pub discord_chat_channel_block_webhooks: bool,
+    /// synchronization.yml: group name -> role ID (all-zero IDs and empty names are skipped).
+    pub group_role_synchronization_groups_and_roles_to_sync: HashMap<String, String>,
+    #[serde(default = "yes")]
+    pub group_role_synchronization_minecraft_is_authoritative: bool,
+    pub group_role_synchronization_one_way: bool,
+    pub group_role_synchronization_primary_group_only: bool,
+    #[serde(default = "yes")]
+    pub group_role_synchronization_on_link: bool,
+    /// Minutes between the synchronizations of the players on the server (at least 1).
+    #[serde(default = "five")]
+    pub group_role_synchronization_cycle_time: u64,
+    pub ban_synchronization_discord_to_minecraft: bool,
+    #[serde(default = "ban_reason")]
+    pub ban_synchronization_discord_to_minecraft_reason: String,
+    pub ban_synchronization_minecraft_to_discord: bool,
     /// `Experiment_WebhookChatMessageDelivery` (default false): a player's chat goes out through the
     /// bot's webhook in the chat channel (named `DiscordSRV`) instead of a message of the bot.
     #[serde(rename = "Experiment_WebhookChatMessageDelivery")]
@@ -200,6 +215,19 @@ pub struct Chat {
     pub discord_linked_account_check_failed: String,
 }
 
+fn five() -> u64 {
+    5
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn ban_reason() -> String {
+    "&cYou have been banned until further notice from the server because you were banned on our Discord server."
+        .to_string()
+}
+
 /// The `Require linked account to play` section of linking.yml.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -216,12 +244,19 @@ pub struct RequireLinked {
     pub messages: RequireLinkedMessages,
 }
 
+/// `Require linked account to play.Messages.Kicked for unlinking`, English default.
+pub const KICKED_FOR_UNLINKING: &str =
+    "&cYou have been kicked from the server for unlinking your accounts.\n\nPlease rejoin the server to link your accounts again.";
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct RequireLinkedMessages {
     /// Kick text while the bridge has not connected to Discord yet; empty: the default.
     #[serde(rename = "DiscordSRV still starting")]
     pub still_starting: String,
+    /// Kick text of a player who unlinks while linking is required; empty: the default.
+    #[serde(rename = "Kicked for unlinking")]
+    pub kicked_for_unlinking: String,
 }
 
 /// One `ChannelUpdater` entry: a channel whose name shows server information.
