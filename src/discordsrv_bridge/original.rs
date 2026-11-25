@@ -127,7 +127,11 @@ fn to_json(node: &Node, key: &str) -> Value {
         Node::Map { entries, .. } => Value::Object(
             entries
                 .iter()
-                .map(|e| (e.key.clone(), to_json(&e.value, &e.key)))
+                .map(|e| {
+                    // The role IDs of the group synchronisation map are IDs, whatever the group is called.
+                    let child = if key == "GroupRoleSynchronizationGroupsAndRolesToSync" { "RoleId" } else { &e.key };
+                    (e.key.clone(), to_json(&e.value, child))
+                })
                 .filter(|(_, v)| !v.is_null())
                 .collect(),
         ),
