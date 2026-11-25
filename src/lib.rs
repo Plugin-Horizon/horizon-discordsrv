@@ -32,10 +32,11 @@ use mod_api::{
     Command, CommandArgumentValue, CommandSource, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
     NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode, PermissionValueType,
     PlayerAdvancementDoneEvent, PlayerCommandEvent, PlayerDiedEvent, PlayerLoggedInEvent,
-    PlayerLoggedOutEvent, PlayerLoginEvent, Identifier, TextContent, RegisterNodeCommandsEvent, RegisterConfigsEvent,
+    PlayerLoggedOutEvent, PlayerLoginEvent, Identifier, RegisterNodeCommandsEvent, RegisterConfigsEvent,
     RunModCommandEvent, ServerAboutToStartEvent, ServerChatEvent, ServerHost, ServerStoppingEvent, ServerTickEvent,
     ServerTickPhase, Text,
 };
+use mod_api::text::TextContent;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::path::Path;
