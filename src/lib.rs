@@ -66,8 +66,7 @@ fn legacy(host: &dyn ServerHost, line: &str) -> Text {
 
 /// The English line of a vanilla message the bridge takes as plain text.
 /// NOTE: `Text::plain` has no language file, so keys come from the embedded en_us table
-/// (`data/discordsrv/en_us_subset.json`: every `death.*`, `entity.minecraft.*`, `item.minecraft.*`,
-/// `block.minecraft.*` and advancement title); a server in another language gets English here.
+/// (the table below, and names made from `entity.minecraft.*`, `item.minecraft.*`, `block.minecraft.*` keys); a server in another language gets English here.
 fn vanilla_line(key: &str, name: &str) -> Option<String> {
     let text = match key {
         "multiplayer.player.joined" => "{name} joined the game",
@@ -93,35 +92,79 @@ fn vanilla_line(key: &str, name: &str) -> Option<String> {
         "death.attack.sweetBerryBush" => "{name} was poked to death by a sweet berry bush",
         "death.attack.stalagmite" => "{name} was impaled on a stalagmite",
         "death.attack.lightningBolt" => "{name} was struck by lightning",
-        // Any other death key: vanilla's en_us line, when it names only the player.
-        other if other.starts_with("death.") => {
-            let line = lang().get(other)?;
-            if line.contains("%2$s") || line.contains("%3$s") {
-                return None;
-            }
-            return Some(line.replace("%1$s", name));
-        }
+        // The killer's kinds: `%2$s` is the killer, `%3$s` the weapon (the arguments of the built text).
+        "death.attack.mob" => "{name} was slain by %2$s",
+        "death.attack.mob.item" => "{name} was slain by %2$s using %3$s",
+        "death.attack.player" => "{name} was slain by %2$s",
+        "death.attack.player.item" => "{name} was slain by %2$s using %3$s",
+        "death.attack.arrow" => "{name} was shot by %2$s",
+        "death.attack.arrow.item" => "{name} was shot by %2$s using %3$s",
+        "death.attack.fireball" => "{name} was fireballed by %2$s",
+        "death.attack.fireball.item" => "{name} was fireballed by %2$s using %3$s",
+        "death.attack.thrown" => "{name} was pummeled by %2$s",
+        "death.attack.thrown.item" => "{name} was pummeled by %2$s using %3$s",
+        "death.attack.explosion.player" => "{name} was blown up by %2$s",
+        "death.attack.indirectMagic" => "{name} was killed by %2$s using magic",
+        "death.attack.indirectMagic.item" => "{name} was killed by %2$s using %3$s",
+        "death.attack.thorns" => "{name} was killed trying to hurt %2$s",
+        "death.attack.sting" => "{name} was stung to death by %2$s",
+        "death.attack.cramming" => "{name} was squished too much",
+        "death.attack.flyIntoWall" => "{name} experienced kinetic energy",
+        "death.attack.hotFloor" => "{name} discovered the floor was lava",
+        "death.attack.fallingStalactite" => "{name} was skewered by a falling stalactite",
+        "death.attack.badRespawnPoint.message" => "{name} was killed by %2$s",
         _ => return None,
     };
     Some(text.replace("{name}", name))
 }
 
-/// Vanilla's en_us lines for the `death.*` and `advancements.*.title` keys.
-fn lang() -> &'static BTreeMap<String, String> {
-    static LANG: std::sync::OnceLock<BTreeMap<String, String>> = std::sync::OnceLock::new();
-    LANG.get_or_init(|| {
-        serde_json::from_str(include_str!("../data/discordsrv/en_us_subset.json")).unwrap_or_default()
-    })
+/// The English template of a translation key, with `%1$s`.. placeholders: the keys of
+/// [`vanilla_line`], and a name made from the key for `entity.minecraft.*`, `item.minecraft.*` and
+/// `block.minecraft.*` (`zombie_villager` -> `Zombie Villager`). No Mojang language file is shipped.
+fn template(key: &str) -> Option<String> {
+    for prefix in ["entity.minecraft.", "item.minecraft.", "block.minecraft."] {
+        if let Some(id) = key.strip_prefix(prefix) {
+            if id.contains('.') {
+                return None;
+            }
+            let words: Vec<String> = id
+                .split('_')
+                .map(|w| {
+                    let mut c = w.chars();
+                    c.next().map_or_else(String::new, |f| f.to_uppercase().collect::<String>() + c.as_str())
+                })
+                .collect();
+            return Some(words.join(" "));
+        }
+    }
+    vanilla_line(key, "%1$s")
 }
 
 /// A text as plain characters: literals, and translation keys through [`lang`] (the fallback, else the key).
 fn plain_text(text: &Text) -> String {
+    plain_text_with(text, &|_| None)
+}
+
+/// The server's own language text for a key (`ServerHost::translate`, engine branch `rec-server-translate`).
+#[cfg(feature = "next-engine")]
+fn host_translate(host: &dyn ServerHost) -> impl Fn(&str) -> Option<String> + '_ {
+    move |key| host.translate(key)
+}
+
+/// Without the engine call only the built-in English table answers.
+#[cfg(not(feature = "next-engine"))]
+fn host_translate(_: &dyn ServerHost) -> impl Fn(&str) -> Option<String> {
+    |_| None
+}
+
+/// [`plain_text`] with `tr` asked first for each translation key (then the table, the fallback, the key).
+fn plain_text_with(text: &Text, tr: &dyn Fn(&str) -> Option<String>) -> String {
     let mut out = match &text.content {
         TextContent::Literal(s) => s.clone(),
         TextContent::Translatable { key, fallback, arguments } => {
-            let mut line = lang().get(key).cloned().or_else(|| fallback.clone()).unwrap_or_else(|| key.clone());
+            let mut line = tr(key).or_else(|| template(key)).or_else(|| fallback.clone()).unwrap_or_else(|| key.clone());
             for (i, arg) in arguments.iter().enumerate() {
-                let value = plain_text(arg);
+                let value = plain_text_with(arg, tr);
                 line = line.replace(&format!("%{}$s", i + 1), &value);
                 if let Some(at) = line.find("%s") {
                     line.replace_range(at..at + 2, &value);
@@ -132,7 +175,7 @@ fn plain_text(text: &Text) -> String {
         _ => String::new(),
     };
     for child in &text.children {
-        out.push_str(&plain_text(child));
+        out.push_str(&plain_text_with(child, tr));
     }
     out
 }
@@ -145,6 +188,7 @@ fn plain_text(text: &Text) -> String {
 fn death_line(cause: Option<&str>, name: &str) -> String {
     cause
         .and_then(|key| vanilla_line(key, name))
+        .filter(|line| !line.contains("%2$s"))
         .or_else(|| vanilla_line("death.attack.generic", name))
         .unwrap_or_default()
 }
@@ -234,7 +278,8 @@ fn advancement_title(host: &mut dyn ServerHost, advancement: &str) -> Option<Str
     if !display.announce_to_chat {
         return None;
     }
-    Some(plain_text(&display.title))
+    let tr = host_translate(&*host);
+    Some(plain_text_with(&display.title, &tr))
 }
 
 /// The answer to `/discord <args>`. `sender` is the player (uuid, name); None is the console (or a
@@ -421,7 +466,8 @@ impl Hooks for Mod {
         let Some(text) = event.message.as_ref() else {
             return;
         };
-        let message = plain_text(text);
+        let tr = host_translate(&*host);
+        let message = plain_text_with(text, &tr);
         if message.trim().is_empty() {
             return;
         }
@@ -615,6 +661,7 @@ mod tests {
     #[test]
     fn other_death_keys_come_from_the_lang_table() {
         assert_eq!(death_line(Some("death.attack.cramming"), "Tester"), "Tester was squished too much");
+        // A killer line needs its arguments: the generic one is the fallback.
         assert_eq!(death_line(Some("death.attack.mob"), "Tester"), "Tester died");
     }
 
@@ -633,10 +680,11 @@ mod tests {
     }
 
     #[test]
-    fn translatable_titles_are_flattened_with_the_lang_table() {
+    fn translatable_titles_are_flattened() {
         let t = Text::translate("advancements.story.mine_stone.title", vec![]);
-        assert_eq!(plain_text(&t), "Stone Age");
+        assert_eq!(plain_text(&t), "advancements.story.mine_stone.title");
         assert_eq!(plain_text(&Text::literal("Custom")), "Custom");
+        assert_eq!(template("entity.minecraft.zombie_villager").as_deref(), Some("Zombie Villager"));
     }
 
     #[test]

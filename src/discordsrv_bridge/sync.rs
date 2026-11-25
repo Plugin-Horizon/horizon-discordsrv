@@ -51,6 +51,11 @@ pub fn plan(
     (add, remove)
 }
 
+/// The nickname format filled in and cut to Discord's 32 characters.
+pub fn nickname(format: &str, name: &str) -> String {
+    format.replace("%username%", name).replace("%displayname%", name).chars().take(32).collect()
+}
+
 static LAST_CYCLE_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Whether a synchronisation of everyone is due: `minutes` (at least 1) after the last one.
@@ -79,6 +84,28 @@ impl Shared {
             .any(|(group, role)| !group.trim().is_empty() && !blank_role(role))
     }
 
+    /// `NicknameSynchronization*`: each linked member's nickname becomes the formatted player name.
+    fn sync_nicknames(&self, players: &HashMap<u128, Groups>) {
+        let c = &self.config.chat;
+        if !c.nickname_synchronization_enabled {
+            return;
+        }
+        for uuid in players.keys() {
+            let (discord, name, guild) = {
+                let st = self.lock_state();
+                let Some(discord) = st.accounts.discord_of(*uuid).map(str::to_string) else { continue };
+                let Some(name) = crate::discordsrv_bridge::commands::known_name(&st, &self.server, *uuid) else { continue };
+                let guild = c.channel_for("global").and_then(|ch| st.cache.guild_of_channel(ch)).map(|g| g.id.clone());
+                (discord, name, guild)
+            };
+            let Some(guild) = guild else { continue };
+            let nick = nickname(&c.nickname_synchronization_format, &name);
+            if let Err(e) = self.rest.set_nick(&guild, &discord, &nick) {
+                log::debug!(target: "horizon_discordsrv", "[DiscordSRV] Nickname synchronization: {e}");
+            }
+        }
+    }
+
     /// The UUIDs of every linked player.
     pub(crate) fn linked_uuids(&self) -> Vec<u128> {
         self.lock_state().accounts.all_uuids()
@@ -88,6 +115,7 @@ impl Shared {
     /// Network calls: runs on the chat thread, never the server thread.
     pub(crate) fn resync_players(&self, players: &HashMap<u128, Groups>) -> usize {
         let c = &self.config.chat;
+        self.sync_nicknames(players);
         // Minecraft -> Discord only: a Discord-authoritative setup changes nothing from here.
         if !self.sync_enabled() || !c.group_role_synchronization_minecraft_is_authoritative {
             return 0;
@@ -182,6 +210,13 @@ mod tests {
         let groups = Groups { all: vec!["vip".into()], primary: None };
         let (add, remove) = plan(&map(), &groups, false, &["222".to_string()]);
         assert!(add.is_empty() && remove.is_empty());
+    }
+
+    #[test]
+    fn nicknames_follow_the_format_and_are_cut() {
+        assert_eq!(nickname("%displayname%", "Tester"), "Tester");
+        assert_eq!(nickname("[MC] %username%", "Tester"), "[MC] Tester");
+        assert_eq!(nickname("%username%%username%%username%%username%", "Abcdefgh").chars().count(), 32);
     }
 
     #[test]

@@ -108,6 +108,11 @@ pub struct Chat {
     /// Minutes between the synchronizations of the players on the server (at least 1).
     #[serde(default = "five")]
     pub group_role_synchronization_cycle_time: u64,
+    /// `NicknameSynchronizationEnabled`: the linked Discord member's nickname follows the player's name.
+    pub nickname_synchronization_enabled: bool,
+    /// `%username%` and `%displayname%` (both the player's name); cut to Discord's 32 characters.
+    #[serde(default = "nick_format")]
+    pub nickname_synchronization_format: String,
     pub ban_synchronization_discord_to_minecraft: bool,
     #[serde(default = "ban_reason")]
     pub ban_synchronization_discord_to_minecraft_reason: String,
@@ -213,6 +218,10 @@ pub struct Chat {
     pub linking_error: String,
     pub click_to_copy_code: String,
     pub discord_linked_account_check_failed: String,
+}
+
+fn nick_format() -> String {
+    "%displayname%".to_string()
 }
 
 fn five() -> u64 {

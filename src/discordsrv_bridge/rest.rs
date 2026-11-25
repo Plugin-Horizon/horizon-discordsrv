@@ -149,6 +149,11 @@ impl Rest {
         }
     }
 
+    /// Sets a guild member's nickname.
+    pub fn set_nick(&self, guild: &str, user: &str, nick: &str) -> Result<(), String> {
+        self.call("PATCH", &format!("/guilds/{guild}/members/{user}"), Some(json!({ "nick": nick }))).map(drop)
+    }
+
     /// Bans a Discord user from the guild (`DiscordUtil.banMember`); no messages are deleted.
     pub fn ban_member(&self, guild: &str, user: &str) -> Result<(), String> {
         self.call("PUT", &format!("/guilds/{guild}/bans/{user}"), Some(json!({ "delete_message_seconds": 0 }))).map(drop)

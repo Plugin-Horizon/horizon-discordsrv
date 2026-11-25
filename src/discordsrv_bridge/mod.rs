@@ -443,7 +443,7 @@ pub fn tick(tps: f32, players: impl FnOnce() -> Vec<Player>) -> TickWork {
             }
         }
     }
-    if sh.sync_enabled() && sync::cycle_due(sh.config.chat.group_role_synchronization_cycle_time.max(1)) {
+    if (sh.sync_enabled() || sh.config.chat.nickname_synchronization_enabled) && sync::cycle_due(sh.config.chat.group_role_synchronization_cycle_time.max(1)) {
         // GroupRoleSynchronizationCycleTime: the players on the server (not everyone linked).
         let online: Vec<u128> = sh.lock_state().players.iter().map(|p| p.uuid).collect();
         work.resync.extend(online);
