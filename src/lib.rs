@@ -31,13 +31,13 @@ use discordsrv_bridge as bridge;
 use mod_api::{
     Command, CommandArgumentValue, CommandSource, ConsoleCommandEvent, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
     NodeDefault, PermissionGatherNodesEvent, PermissionLevel, PermissionNode, PermissionValueType,
-    BanChangedEvent, BanListKind, PlayerAdvancementDoneEvent, PlayerCommandEvent, PlayerDeathMessageEvent, PlayerLoggedInEvent,
+    BanChangedEvent, BanListKind, ModServiceCallEvent, PermissionGroupsChangedEvent, PlayerAdvancementDoneEvent, PlayerCommandEvent, PlayerDeathMessageEvent, PlayerLoggedInEvent,
     PlayerLoggedOutEvent, PlayerLoginEvent, Identifier, RegisterNodeCommandsEvent, RegisterConfigsEvent,
     RunModCommandEvent, ServerAboutToStartEvent, ServerChatEvent, ServerHost, ServerStoppingEvent, ServerTickEvent,
     ServerTickPhase, Text,
 };
 use mod_api::text::TextContent;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Mutex;
 use std::path::Path;
 
@@ -55,6 +55,14 @@ struct Mod {
     /// Players who held `discordsrv.silentquit` when they joined: the node is asked at login,
     /// because the player is already gone from the server when the quit hook runs.
     silent_quit: Mutex<BTreeSet<u128>>,
+    /// Ticks seen, to sample the players' positions every `Tick speed` ticks for the voice module.
+    voice_ticks: std::sync::atomic::AtomicU64,
+    /// Ticks seen, to read what other mods say about the players about once a second.
+    extras_ticks: std::sync::atomic::AtomicU64,
+    /// The `discordsrv.sync.<group>` nodes are declared (once, after the bridge has read its config).
+    sync_nodes_declared: std::sync::atomic::AtomicBool,
+    /// Players a vanish mod hid when they joined: their quit is not announced either.
+    vanished_join: Mutex<BTreeSet<u128>>,
 }
 
 /// A bridge line as a chat line: its `§` colour codes read as styles (`text_from_legacy`). The
@@ -330,6 +338,94 @@ fn players_of(host: &dyn ServerHost) -> Vec<bridge::Player> {
         .collect()
 }
 
+/// Reads what other mods say about the online players, for the bridge: the primary group the permissions
+/// provider published (Vault's `getPrimaryGroup`), whether a vanish mod hides them (the engine's `hide`, which
+/// SuperVanish uses), and the alias a world mod gives each dimension (Multiverse's `multiverse:world_alias`,
+/// which answers nothing when that mod is not loaded).
+fn publish_extras(host: &mut dyn ServerHost) {
+    let mut extras = HashMap::new();
+    let mut aliases: HashMap<String, String> = HashMap::new();
+    let players = host.players().server_players();
+    for p in players {
+        let uuid = p.uuid();
+        let primary_group = if bridge::hook_enabled("Vault") { host.permission_groups(uuid).primary.unwrap_or_default() } else { String::new() };
+        let vanished = bridge::hook_enabled("SuperVanish") && p.hidden(&*host).is_some_and(|h| h.is_some());
+        extras.insert(uuid, bridge::Extra { primary_group, vanished });
+        let Some(dimension) = p.dimension(&*host).map(|d| d.to_string()) else { continue };
+        if aliases.contains_key(&dimension) {
+            continue;
+        }
+        let world = bridge::world_name(&dimension);
+        if bridge::hook_enabled("Multiverse-Core")
+            && let Ok(reply) = host.commands().call_mod_service("multiverse:world_alias", world.as_bytes())
+            && let Ok(alias) = String::from_utf8(reply)
+            && !alias.trim().is_empty()
+        {
+            aliases.insert(dimension, alias);
+        }
+    }
+    bridge::set_player_extras(extras, aliases);
+}
+
+/// What the group synchronisation sees of a player: the groups the permissions provider published, plus a group for
+/// each `discordsrv.sync.<group>` node they hold, minus each one `discordsrv.sync.deny.<group>` denies (when
+/// `GroupRoleSynchronizationEnableDenyPermission` is on), as DiscordSRV reads them through Vault.
+fn groups_of(host: &mut dyn ServerHost, uuid: u128) -> bridge::sync::Groups {
+    let published = host.permission_groups(uuid);
+    let (mut all, mut primary) = (published.groups, published.primary);
+    let (names, deny) = bridge::sync_group_names();
+    for group in names {
+        if has_node(&mut *host, uuid, &format!("discordsrv.sync.{group}"), NOBODY) && !all.iter().any(|g| g.eq_ignore_ascii_case(&group)) {
+            all.push(group.clone());
+        }
+        if deny && has_node(&mut *host, uuid, &format!("discordsrv.sync.deny.{group}"), NOBODY) {
+            all.retain(|g| !g.eq_ignore_ascii_case(&group));
+            if primary.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(&group)) {
+                primary = None;
+            }
+        }
+    }
+    bridge::sync::Groups { all, primary }
+}
+
+/// Declares `discordsrv.sync.<group>` (and `.deny.`) for every synchronised group: nobody holds them unless granted.
+fn declare_sync_nodes(host: &mut dyn ServerHost) {
+    let (names, deny) = bridge::sync_group_names();
+    for group in names {
+        let _ = host.permission_declare_node(&node(&format!("discordsrv.sync.{group}")), &NodeDefault::Nobody);
+        if deny {
+            let _ = host.permission_declare_node(&node(&format!("discordsrv.sync.deny.{group}")), &NodeDefault::Nobody);
+        }
+    }
+}
+
+/// Discord -> Minecraft group synchronisation: gives or takes a group through the permissions provider.
+/// Horizon has no provider-neutral write (ENGINE_NEEDS `permission_group_write`), so this asks the provider's
+/// console command (LuckPerms' syntax). True when the command ran.
+fn group_write(host: &mut dyn ServerHost, uuid: u128, group: &str, add: bool) -> bool {
+    if group.is_empty() || !group.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
+        return false;
+    }
+    let command = format!("lp user {} parent {} {group}", bridge::server::uuid_string(uuid), if add { "add" } else { "remove" });
+    host.commands().run_command_with_output(&command).success
+}
+
+/// The players with their positions, for the voice module: world, block position and whether they are alive.
+fn voice_players_of(host: &dyn ServerHost) -> Vec<(u128, bridge::voice::VoicePlayer)> {
+    host.players()
+        .server_players()
+        .into_iter()
+        .filter(|p| !p.is_fake(host).unwrap_or(false))
+        .filter_map(|p| {
+            let entity = p.entity();
+            let pos = entity.position(host)?;
+            let alive = host.living(entity).and_then(|l| l.health(host)).is_none_or(|h| h > 0.0);
+            let world = p.dimension(host).map(|d| d.to_string()).unwrap_or_default();
+            Some((p.uuid(), bridge::voice::VoicePlayer { world, pos, alive }))
+        })
+        .collect()
+}
+
 /// The title of an announced advancement: None for a hidden one (no display) or one the game does
 /// not announce in chat (`announce_to_chat` false, recipes, roots).
 fn advancement_title(host: &mut dyn ServerHost, advancement: &str) -> Option<String> {
@@ -431,6 +527,17 @@ impl Hooks for Mod {
         } else {
             rate
         };
+        if let Some(every) = bridge::voice_every()
+            && self.voice_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % every == 0
+        {
+            bridge::voice_players(voice_players_of(&*host));
+        }
+        if bridge::chat_running() && !self.sync_nodes_declared.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            declare_sync_nodes(&mut *host);
+        }
+        if self.extras_ticks.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 20 == 0 && bridge::chat_running() {
+            publish_extras(&mut *host);
+        }
         let work = bridge::tick(tps, || players_of(&*host));
         for command in work.commands {
             host.commands().run_command(&command);
@@ -451,17 +558,30 @@ impl Hooks for Mod {
                 let _ = player.disconnect(host, text);
             }
         }
+        // Group <-> role synchronisation: the groups are read here, the Discord calls run on the chat thread.
+        let mut batches: Vec<(bridge::sync::Direction, Vec<u128>)> = Vec::new();
         if work.resync_all || !work.resync.is_empty() {
-            // Group -> role synchronisation: the groups are read here, the Discord calls run on the chat thread.
             let uuids = if work.resync_all { bridge::linked_uuids() } else { work.resync.clone() };
-            let players = uuids
-                .into_iter()
-                .map(|uuid| {
-                    let g = host.permission_groups(uuid);
-                    (uuid, bridge::sync::Groups { all: g.groups, primary: g.primary })
-                })
-                .collect();
-            bridge::resync(players);
+            batches.push((bridge::sync::Direction::Authoritative, uuids));
+        }
+        if !work.resync_to_minecraft.is_empty() {
+            batches.push((bridge::sync::Direction::ToMinecraft, work.resync_to_minecraft.clone()));
+        }
+        for (direction, uuids) in batches {
+            let mut players = HashMap::new();
+            for uuid in uuids {
+                players.insert(uuid, groups_of(&mut *host, uuid));
+            }
+            bridge::resync(players, direction);
+        }
+        for (uuid, group, add) in work.group_writes {
+            if !group_write(&mut *host, uuid, &group, add) {
+                log::warn!(
+                    target: "horizon_discordsrv",
+                    "[DiscordSRV] Group synchronization: the permissions provider did not {} the group {group}",
+                    if add { "give" } else { "take" }
+                );
+            }
         }
         for name in work.mentions {
             // MinecraftMentionSound: the note-block pling, to the mentioned player only.
@@ -476,6 +596,46 @@ impl Hooks for Mod {
                 let text = legacy(&*host, &line);
                 let _ = player.tell(host, text);
             }
+        }
+    }
+
+    /// DiscordSRV's LuckPerms hook (instant group updates): a group change on the server updates the roles at once.
+    fn permission_groups_changed(&self, _: &mut dyn ServerHost, event: &mut PermissionGroupsChangedEvent<'_>) {
+        // Fired inside the provider's own publish call: the published groups are used as they are and no permission
+        // node is asked here (the provider may be mid-update); `discordsrv.sync.<group>` nodes count at the next cycle.
+        bridge::groups_changed(event.player, bridge::sync::Groups { all: event.new.groups.clone(), primary: event.new.primary.clone() });
+    }
+
+    /// The services other mods can call (`host.commands().call_mod_service`):
+    /// - `discordsrv:placeholder`, payload `<uuid as 32 hex digits, or -> <identifier>`: the value of `%discordsrv_<identifier>%`
+    ///   (DiscordSRV's PlaceholderAPI expansion), reply the text; unknown for a player: unhandled.
+    /// - `discordsrv:contexts`, payload `<uuid>`: LuckPerms' contexts, reply `key=value` lines.
+    /// - `discordsrv:fake_join` / `discordsrv:fake_quit`, payload `<uuid> <message>`: a vanish mod's fake join or quit
+    ///   message is announced on Discord (SuperVanish's `PostPlayerShowEvent` / `PostPlayerHideEvent`).
+    fn mod_service_call(&self, host: &mut dyn ServerHost, event: &mut ModServiceCallEvent<'_>) -> Option<mod_api::PayloadBytes> {
+        let text = std::str::from_utf8(&event.payload.0).ok()?;
+        let (who, rest) = text.split_once(' ').unwrap_or((text, ""));
+        let uuid = if who == "-" { None } else { bridge::server::parse_uuid(who) };
+        match event.service {
+            "discordsrv:placeholder" => bridge::placeholder(uuid, rest.trim()).map(|v| mod_api::PayloadBytes(v.into_bytes())),
+            "discordsrv:contexts" => {
+                let lines: Vec<String> = bridge::contexts(uuid?).into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+                Some(mod_api::PayloadBytes(lines.join("\n").into_bytes()))
+            }
+            "discordsrv:fake_join" | "discordsrv:fake_quit" => {
+                let uuid = uuid?;
+                let join = event.service == "discordsrv:fake_join";
+                let name = host.player(uuid).and_then(|p| p.name(&*host)).or_else(|| bridge::known_player(uuid).map(|p| p.name))?;
+                let node = if join { "discordsrv.silentjoin" } else { "discordsrv.silentquit" };
+                let silent = has_node(&mut *host, uuid, node, NOBODY);
+                if join {
+                    bridge::player_join(uuid, &name, rest, silent);
+                } else {
+                    bridge::player_leave(uuid, &name, rest, silent);
+                }
+                Some(mod_api::PayloadBytes(b"ok".to_vec()))
+            }
+            _ => None,
         }
     }
 
@@ -510,7 +670,14 @@ impl Hooks for Mod {
             lock_set(&self.silent_quit).insert(event.player);
         }
         bridge::minecraft_unban_on_join(event.player);
-        bridge::player_join(event.player, &event.name, &message, silent);
+        // A vanish mod hides them: no join message (PlayerJoinLeaveListener), and no quit message later.
+        let vanished = bridge::hook_enabled("SuperVanish")
+            && host.player(event.player).and_then(|p| p.hidden(&*host)).is_some_and(|h| h.is_some());
+        if vanished {
+            lock_set(&self.vanished_join).insert(event.player);
+        } else {
+            bridge::player_join(event.player, &event.name, &message, silent);
+        }
         alert(host, bridge::alerts::Kind::Join, Some(event.player), &message, false);
     }
 
@@ -521,7 +688,10 @@ impl Hooks for Mod {
         let message = vanilla_line("multiplayer.player.left", &event.name).unwrap_or_default();
         // discordsrv.silentquit, default nobody: the answer from login (the player is already gone here).
         let silent = lock_set(&self.silent_quit).remove(&event.player);
-        bridge::player_leave(event.player, &event.name, &message, silent);
+        let vanished = lock_set(&self.vanished_join).remove(&event.player) || bridge::is_vanished(event.player);
+        if !vanished {
+            bridge::player_leave(event.player, &event.name, &message, silent);
+        }
         alert(host, bridge::alerts::Kind::Quit, Some(event.player), &message, false);
     }
 

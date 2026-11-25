@@ -303,6 +303,8 @@ pub struct GameChat<'a> {
     pub display_name: &'a str,
     pub message: &'a str,
     pub primary_group: &'a str,
+    /// The world mod's alias for the player's world (the world's name when it has none): `%worldalias%`.
+    pub world_alias: &'a str,
     pub world: &'a str,
     pub date: &'a str,
     /// The game channel (`global`); `%channelname%` shows it with a capital.
@@ -345,7 +347,7 @@ pub fn minecraft_to_discord(chat: &Chat, filters: &ChatFilters, cache: &Cache, m
             ("username", &escape_markdown(&username)),
             ("displayname", &escape_markdown(&display)),
             ("primarygroup", m.primary_group),
-            ("worldalias", m.world),
+            ("worldalias", m.world_alias),
             ("world", m.world),
             ("date", m.date),
             ("time", m.date),
@@ -627,7 +629,7 @@ mod tests {
     }
 
     fn game<'a>(message: &'a str, group: &'a str) -> GameChat<'a> {
-        GameChat { username: "jeb_", display_name: "jeb_", message, primary_group: group, world: "world", date: "", channel: "global" }
+        GameChat { username: "jeb_", display_name: "jeb_", message, primary_group: group, world: "world", world_alias: "world", date: "", channel: "global" }
     }
 
     #[test]
@@ -670,7 +672,7 @@ mod tests {
         let mut c = chat();
         c.discord_chat_channel_prefix_required_to_process_message = "!".into();
         let f = ChatFilters::new(&c).unwrap();
-        let m = |message| GameChat { username: "a", display_name: "a", message, primary_group: "", world: "", date: "", channel: "global" };
+        let m = |message| GameChat { username: "a", display_name: "a", message, primary_group: "", world: "", world_alias: "", date: "", channel: "global" };
         assert!(minecraft_to_discord(&c, &f, &Cache::default(), &m("hi")).is_none());
         assert!(minecraft_to_discord(&c, &f, &Cache::default(), &m("!hi")).is_some());
         c.discord_chat_channel_prefix_acts_as_blacklist = true;
@@ -697,7 +699,7 @@ mod webhook_tests {
     }
 
     fn game(message: &str) -> GameChat<'_> {
-        GameChat { username: "jeb_", display_name: "Jeb", message, primary_group: "", world: "world", date: "", channel: "global" }
+        GameChat { username: "jeb_", display_name: "Jeb", message, primary_group: "", world: "world", world_alias: "world", date: "", channel: "global" }
     }
 
     fn member() -> Member {
@@ -753,7 +755,7 @@ mod webhook_tests {
         let c = chat();
         let f = ChatFilters::new(&c).unwrap();
         let long = "a".repeat(100);
-        let g = GameChat { username: "jeb_", display_name: &long, message: "hi", primary_group: "", world: "world", date: "", channel: "global" };
+        let g = GameChat { username: "jeb_", display_name: &long, message: "hi", primary_group: "", world: "world", world_alias: "world", date: "", channel: "global" };
         let (name, _) = webhook_message(&c, &f, &sample(), &g, None).unwrap();
         assert_eq!(name.chars().count(), 80);
     }

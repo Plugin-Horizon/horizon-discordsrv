@@ -51,6 +51,68 @@ pub struct Config {
     /// Chat channels, notifications, linking, watchdog (missing keys: off).
     #[serde(flatten)]
     pub chat: Chat,
+    /// voice.yml (missing keys: off).
+    #[serde(flatten)]
+    pub voice: VoiceSettings,
+    /// `EnablePresenceInformation`: ask Discord for the (privileged) presences intent, so the placeholders about what
+    /// a member is doing (`user_online_status`, `user_game_name`, `linked_online` ...) have an answer. Off by default:
+    /// the intent must be switched on for the bot in the Developer Portal first.
+    pub enable_presence_information: bool,
+    /// `DisabledPluginHooks`: hooks that are not used, by name (case does not matter): `LuckPerms-GroupUpdates`,
+    /// `LuckPerms-Contexts` (or `LuckPerms` for both), `PlaceholderAPI`, `Multiverse-Core`, `SuperVanish`, `Vault`.
+    pub disabled_plugin_hooks: Vec<String>,
+}
+
+/// The keys of voice.yml, under the original's names.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct VoiceSettings {
+    #[serde(rename = "Voice enabled")]
+    pub enabled: bool,
+    /// Game ticks between voice checks (default 5).
+    #[serde(rename = "Tick speed")]
+    pub tick_speed: u64,
+    #[serde(rename = "Voice category")]
+    pub category: String,
+    #[serde(rename = "Lobby channel")]
+    pub lobby: String,
+    #[serde(rename = "Mute users who bypass speak permissions in the lobby")]
+    pub mute_bypassers: bool,
+    #[serde(rename = "Network")]
+    pub network: VoiceNetwork,
+}
+
+/// The `Network` section of voice.yml.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct VoiceNetwork {
+    #[serde(rename = "Vertical Strength")]
+    pub vertical_strength: f64,
+    #[serde(rename = "Horizontal Strength")]
+    pub horizontal_strength: f64,
+    #[serde(rename = "Falloff")]
+    pub falloff: f64,
+    #[serde(rename = "Channels are visible")]
+    pub channels_visible: bool,
+}
+
+impl Default for VoiceNetwork {
+    fn default() -> Self {
+        VoiceNetwork { vertical_strength: 40.0, horizontal_strength: 80.0, falloff: 5.0, channels_visible: false }
+    }
+}
+
+impl Default for VoiceSettings {
+    fn default() -> Self {
+        VoiceSettings {
+            enabled: false,
+            tick_speed: 5,
+            category: String::new(),
+            lobby: String::new(),
+            mute_bypassers: true,
+            network: VoiceNetwork::default(),
+        }
+    }
 }
 
 /// A password: kept out of `Debug` output.
@@ -179,6 +241,8 @@ pub struct Chat {
     #[serde(default = "yes")]
     pub group_role_synchronization_minecraft_is_authoritative: bool,
     pub group_role_synchronization_one_way: bool,
+    /// `GroupRoleSynchronizationEnableDenyPermission`: `discordsrv.sync.deny.<group>` keeps a player out of a synchronised group.
+    pub group_role_synchronization_enable_deny_permission: bool,
     pub group_role_synchronization_primary_group_only: bool,
     #[serde(default = "yes")]
     pub group_role_synchronization_on_link: bool,
@@ -539,6 +603,9 @@ impl Default for Config {
             proxy_user: String::new(),
             proxy_password: Secret::default(),
             chat: Chat::default(),
+            voice: VoiceSettings::default(),
+            enable_presence_information: false,
+            disabled_plugin_hooks: Vec::new(),
         }
     }
 }

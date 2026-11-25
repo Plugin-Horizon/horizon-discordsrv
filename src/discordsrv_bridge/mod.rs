@@ -17,11 +17,13 @@ pub mod gateway;
 pub mod guild;
 pub mod linking;
 pub mod original;
+pub mod placeholders;
 pub mod relay;
 pub mod requirelink;
 pub mod rest;
 pub mod server;
 pub mod sync;
+pub mod voice;
 pub mod ws;
 pub mod yaml;
 
@@ -85,6 +87,10 @@ pub struct Shared {
     to_game: Mutex<TickWork>,
     /// The parsed `Alerts` (alerts.yml).
     alerts: Vec<alerts::Alert>,
+    /// The voice module's networks (voice.yml); idle when `Voice enabled` is off.
+    voice: Mutex<voice::Voice>,
+    /// A placeholder asked for the member count: the chat thread fetches it from Discord about once a minute.
+    counts_wanted: AtomicBool,
 }
 
 /// What the gateway and the game told, guarded together.
@@ -118,6 +124,11 @@ pub struct TickWork {
     /// (every linked player when `resync_all`).
     pub resync: Vec<u128>,
     pub resync_all: bool,
+    /// A Discord role edit wants the groups of these players to follow (Discord decides).
+    pub resync_to_minecraft: Vec<u128>,
+    /// Groups to give (`true`) or take from a player: Discord -> Minecraft synchronisation. The server
+    /// thread writes them through the permissions provider.
+    pub group_writes: Vec<(u128, String, bool)>,
 }
 
 /// The players of `names` that `message` mentions as `@name`, as `PlayerUtil.notifyPlayersOfMentions`
@@ -390,6 +401,8 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
         jobs: Mutex::new(VecDeque::new()),
         to_game: Mutex::new(TickWork::default()),
         alerts: alert_list,
+        voice: Mutex::new(voice::Voice::default()),
+        counts_wanted: AtomicBool::new(false),
     });
     let mut threads = Vec::new();
     {
@@ -416,6 +429,10 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
         let s = Arc::clone(&shared);
         threads.push(std::thread::Builder::new().name("DiscordSRV - Chat".into()).spawn(move || relay::chat_loop(&s)));
         log::info!(target: "horizon_discordsrv", "[DiscordSRV] Chat bridge started ({} channels)", shared.config.chat.channels.len());
+    }
+    if shared.config.voice.enabled {
+        let s = Arc::clone(&shared);
+        threads.push(std::thread::Builder::new().name("DiscordSRV - Voice".into()).spawn(move || voice::run(&s)));
     }
     let threads: Vec<JoinHandle<()>> = threads.into_iter().filter_map(Result::ok).collect();
     *slot = Some(Running { shared, threads });
@@ -634,11 +651,123 @@ pub fn player_leave(uuid: u128, name: &str, message: &str, silent: bool) {
     }
 }
 
+/// What other mods say about a player: the permissions provider's primary group (Vault's `getPrimaryGroup`)
+/// and whether a vanish mod hides them (`PlayerUtil.isVanished`). Read on the server thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Extra {
+    pub primary_group: String,
+    pub vanished: bool,
+}
+
+/// The players' [`Extra`]s and the world aliases (a Multiverse alias by dimension), refreshed about once a second.
+/// A static of their own: the server thread sets them from inside the player snapshot, which holds the state lock.
+#[derive(Debug, Default)]
+struct Extras {
+    players: HashMap<u128, Extra>,
+    aliases: HashMap<String, String>,
+}
+
+static EXTRAS: Mutex<Option<Extras>> = Mutex::new(None);
+
+fn extras<T>(f: impl FnOnce(&mut Extras) -> T) -> T {
+    f(EXTRAS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Extras::default))
+}
+
+/// The server thread's view of the other mods, for the player list, the nickname synchronisation and the join notices.
+pub fn set_player_extras(players: HashMap<u128, Extra>, aliases: HashMap<String, String>) {
+    extras(|e| {
+        e.players = players;
+        e.aliases = aliases;
+    });
+}
+
+/// A vanish mod hides the player (`PlayerUtil.isVanished`), as of the last snapshot.
+pub fn is_vanished(uuid: u128) -> bool {
+    extras(|e| e.players.get(&uuid).is_some_and(|x| x.vanished))
+}
+
+/// The player's primary group, empty when no provider publishes one.
+pub fn primary_group(uuid: u128) -> String {
+    extras(|e| e.players.get(&uuid).map(|x| x.primary_group.clone()).unwrap_or_default())
+}
+
+/// The alias a world mod gives the dimension; the world name when it gives none (`DiscordSRV#getWorldAlias`).
+pub fn world_alias(dimension: &str, world: &str) -> String {
+    extras(|e| e.aliases.get(dimension).filter(|a| !a.trim().is_empty()).cloned()).unwrap_or_else(|| world.to_string())
+}
+
 /// The groups of players for the synchronisation (`TickWork::resync`), read on the server thread:
 /// the Discord roles are changed on the chat thread.
-pub fn resync(players: HashMap<u128, sync::Groups>) {
+pub fn resync(players: HashMap<u128, sync::Groups>, direction: sync::Direction) {
     if let Some(sh) = shared() {
-        sh.push_job(relay::Job::Resync { players });
+        sh.push_job(relay::Job::Resync { players, direction });
+    }
+}
+
+/// The permissions provider published other groups for a player (DiscordSRV's LuckPerms hook, instant
+/// group updates): their roles follow at once when the group synchronisation is on.
+pub fn groups_changed(uuid: u128, groups: sync::Groups) {
+    if !hook_enabled("LuckPerms-GroupUpdates") {
+        return;
+    }
+    if let Some(sh) = shared()
+        && sh.sync_enabled()
+        && sh.lock_state().accounts.discord_of(uuid).is_some()
+    {
+        sh.push_job(relay::Job::Resync { players: HashMap::from([(uuid, groups)]), direction: sync::Direction::ToDiscord });
+    }
+}
+
+/// The groups of `GroupRoleSynchronizationGroupsAndRolesToSync` (those with a real role) and whether
+/// `GroupRoleSynchronizationEnableDenyPermission` is on: the server declares `discordsrv.sync.<group>` for each.
+pub fn sync_group_names() -> (Vec<String>, bool) {
+    let Some(sh) = shared() else { return (Vec::new(), false) };
+    let c = &sh.config.chat;
+    let mut names: Vec<String> = c
+        .group_role_synchronization_groups_and_roles_to_sync
+        .iter()
+        .filter(|(g, r)| !g.trim().is_empty() && r.replace('0', "").trim().chars().any(|ch| ch.is_ascii_digit()))
+        .map(|(g, _)| g.trim().to_string())
+        .collect();
+    names.sort();
+    (names, c.group_role_synchronization_enable_deny_permission)
+}
+
+/// Whether a plugin hook is in use: not named in `DisabledPluginHooks` (case does not matter; `LuckPerms` also
+/// switches off `LuckPerms-GroupUpdates` and `LuckPerms-Contexts`). Hooks are on while the bridge is off.
+pub fn hook_enabled(name: &str) -> bool {
+    let Some(sh) = shared() else { return true };
+    let base = name.split('-').next().unwrap_or(name);
+    !sh.config.disabled_plugin_hooks.iter().any(|d| d.trim().eq_ignore_ascii_case(name) || d.trim().eq_ignore_ascii_case(base))
+}
+
+/// The value of `%discordsrv_<identifier>%` for a player (`discordsrv:placeholder`): see [`placeholders`].
+pub fn placeholder(uuid: Option<u128>, identifier: &str) -> Option<String> {
+    if !hook_enabled("PlaceholderAPI") {
+        return None;
+    }
+    placeholders::value(&shared()?, uuid, identifier)
+}
+
+/// The LuckPerms contexts for a player (`discordsrv:contexts`): key and value pairs, see [`placeholders::contexts`].
+pub fn contexts(uuid: u128) -> Vec<(String, String)> {
+    if !hook_enabled("LuckPerms-Contexts") {
+        return Vec::new();
+    }
+    shared().map(|sh| placeholders::contexts(&sh, uuid)).unwrap_or_default()
+}
+
+/// Game ticks between the server thread's voice position samples, when the voice module runs.
+pub fn voice_every() -> Option<u64> {
+    shared().filter(|sh| sh.config.voice.enabled).map(|sh| sh.config.voice.tick_speed.max(1))
+}
+
+/// The server's players with their positions, for the voice module (every [`voice_every`] ticks).
+pub fn voice_players(players: Vec<(u128, voice::VoicePlayer)>) {
+    if let Some(sh) = shared()
+        && sh.config.voice.enabled
+    {
+        sh.voice.lock().unwrap_or_else(|e| e.into_inner()).update_players(players);
     }
 }
 
@@ -759,6 +888,8 @@ impl Shared {
             jobs: Mutex::new(VecDeque::new()),
             to_game: Mutex::new(TickWork::default()),
             alerts: Vec::new(),
+            voice: Mutex::new(voice::Voice::default()),
+            counts_wanted: AtomicBool::new(false),
         }
     }
 

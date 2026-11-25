@@ -94,11 +94,10 @@ fn is_real_id(id: &str) -> bool {
 
 /// The switched-on features of the original that the port does not run.
 fn unported(root: &Map<String, Value>) -> Vec<&'static str> {
-    let on = |k: &str| root.get(k).and_then(Value::as_bool) == Some(true);
     let mut out = Vec::new();
     // Ported: the login requirement with its membership, subscriber, whitelist and name-ban checks,
-    // nickname and ban synchronisation, alerts. Only the Discord -> Minecraft part of the group
-    // synchronisation and voice are left.
+    // nickname and ban synchronisation, alerts, voice. Only the Discord -> Minecraft part of the group
+    // synchronisation is left.
     if root
         .get("GroupRoleSynchronizationGroupsAndRolesToSync")
         .and_then(Value::as_object)
@@ -106,15 +105,12 @@ fn unported(root: &Map<String, Value>) -> Vec<&'static str> {
     {
         out.push("synchronization.yml: group and role synchronisation");
     }
-    if on("Voice enabled") {
-        out.push("voice.yml: voice");
-    }
     out
 }
 
 /// A key is an ID when its name says so: the IDs of channels, roles and users, and the `Channels` values.
 fn id_key(key: &str) -> bool {
-    key.ends_with("Id") || key.ends_with("Ids") || key == "Channels"
+    key.ends_with("Id") || key.ends_with("Ids") || key == "Channels" || key == "Voice category" || key == "Lobby channel"
 }
 
 /// A YAML node as JSON. `key` is the name of the entry holding it (what the scalar means).
@@ -306,10 +302,23 @@ DiscordChatChannelRoleAliases: {"Developer": "Dev"}
 
     #[test]
     fn switched_on_features_the_port_lacks_are_named() {
-        let voice = "Voice enabled: true\n";
-        let dir = folder("unported", &[("config.yml", CONFIG), ("messages.yml", MESSAGES), ("voice.yml", voice)]);
+        let sync = "GroupRoleSynchronizationGroupsAndRolesToSync: {\"admin\": 555555555555555555}\n";
+        let dir = folder("unported", &[("config.yml", CONFIG), ("messages.yml", MESSAGES), ("synchronization.yml", sync)]);
         let o = load(&dir).unwrap().unwrap();
-        assert_eq!(o.unported, vec!["voice.yml: voice"]);
+        assert_eq!(o.unported, vec!["synchronization.yml: group and role synchronisation"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn voice_yml_is_read_with_its_ids_as_strings() {
+        let voice = "Voice enabled: true\nTick speed: 4\nVoice category: 000000000000000001\nLobby channel: 123456789012345678\nNetwork:\n  Vertical Strength: 30\n  Horizontal Strength: 60.5\n  Falloff: 2\n  Channels are visible: true\n";
+        let dir = folder("voice", &[("config.yml", CONFIG), ("messages.yml", MESSAGES), ("voice.yml", voice)]);
+        let o = load(&dir).unwrap().unwrap();
+        assert!(o.unported.is_empty());
+        let v = &o.config.voice;
+        assert!(v.enabled && v.network.channels_visible);
+        assert_eq!((v.tick_speed, v.category.as_str(), v.lobby.as_str()), (4, "000000000000000001", "123456789012345678"));
+        assert_eq!((v.network.vertical_strength, v.network.horizontal_strength, v.network.falloff), (30.0, 60.5, 2.0));
         fs::remove_dir_all(dir).unwrap();
     }
 

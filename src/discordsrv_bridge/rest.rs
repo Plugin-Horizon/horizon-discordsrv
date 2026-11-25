@@ -176,6 +176,43 @@ impl Rest {
         self.call("DELETE", &format!("/guilds/{guild}/bans/{user}"), None).map(drop)
     }
 
+    /// A voice channel in a category with permission overwrites (`overwrites` is the JSON list the API takes);
+    /// the new channel's ID.
+    pub fn create_voice_channel(&self, guild: &str, name: &str, category: &str, overwrites: Value) -> Result<String, String> {
+        let body = json!({ "name": name, "type": 2, "parent_id": category, "permission_overwrites": overwrites });
+        let answer = self.call("POST", &format!("/guilds/{guild}/channels"), Some(body))?;
+        answer.get("id").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "no channel id".into())
+    }
+
+    /// Moves a member out of / into a voice channel (`VOICE_MOVE_OTHERS`).
+    pub fn move_member(&self, guild: &str, user: &str, channel: &str) -> Result<(), String> {
+        self.call("PATCH", &format!("/guilds/{guild}/members/{user}"), Some(json!({ "channel_id": channel }))).map(drop)
+    }
+
+    /// Server-mutes or unmutes a member in voice.
+    pub fn set_member_mute(&self, guild: &str, user: &str, mute: bool) -> Result<(), String> {
+        self.call("PATCH", &format!("/guilds/{guild}/members/{user}"), Some(json!({ "mute": mute }))).map(drop)
+    }
+
+    pub fn delete_channel(&self, channel: &str) -> Result<(), String> {
+        self.call("DELETE", &format!("/channels/{channel}"), None).map(drop)
+    }
+
+    /// Sets one permission overwrite of a channel (`kind` 0: a role, 1: a member).
+    pub fn put_overwrite(&self, channel: &str, id: &str, kind: u8, allow: u64, deny: u64) -> Result<(), String> {
+        let body = json!({ "type": kind, "allow": allow.to_string(), "deny": deny.to_string() });
+        self.call("PUT", &format!("/channels/{channel}/permissions/{id}"), Some(body)).map(drop)
+    }
+
+    /// The guild with its approximate member and presence counts (`guild_members_online` / `_total`).
+    pub fn guild_counts(&self, guild: &str) -> Result<(u64, u64), String> {
+        let v = self.call("GET", &format!("/guilds/{guild}?with_counts=true"), None)?;
+        Ok((
+            v.get("approximate_presence_count").and_then(Value::as_u64).unwrap_or(0),
+            v.get("approximate_member_count").and_then(Value::as_u64).unwrap_or(0),
+        ))
+    }
+
     /// One request; a 429 waits its `retry_after` and tries again (three times at most), a 5xx
     /// once after a second.
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
