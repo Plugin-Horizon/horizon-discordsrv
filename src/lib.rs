@@ -27,6 +27,7 @@
 //! Until a preprocessor is set, a console channel message runs as it came.
 
 pub mod discordsrv_bridge;
+mod cmdkit;
 use discordsrv_bridge as bridge;
 use mod_api::{
     Command, CommandArgumentValue, CommandSource, ConsoleCommandEvent, ConsoleLineEvent, Config, ConfigKind, Flow, Hooks, HostSide,
@@ -49,6 +50,31 @@ const ID: &str = "discordsrv";
 /// Relative to the server's `config/` folder.
 const CONFIG_FILE: &str = "discordsrv/config.toml";
 const GAME_VERSION: &str = "26.3";
+
+const USAGES: [(&str, u8, &str); 20] = [
+    ("", 0, "discordsrv.discord"),
+    (" help [command:word]", 0, "discordsrv.help"),
+    (" link", 0, "discordsrv.link"),
+    (" link <player:player_name> <discord:text>", 2, "discordsrv.link.others"),
+    (" linked", 0, "discordsrv.linked"),
+    (" linked <target:text>", 2, "discordsrv.linked.others"),
+    (" unlink", 2, "discordsrv.unlink"),
+    (" unlink <target:text>", 2, "discordsrv.unlink"),
+    (" clearlinked", 2, "discordsrv.unlink"),
+    (" clearlinked <target:text>", 2, "discordsrv.unlink"),
+    (" broadcast <message:text>", 2, "discordsrv.bcast"),
+    (" bcast <message:text>", 2, "discordsrv.bcast"),
+    (" resync", 2, "discordsrv.resync"),
+    (" reload", 2, "discordsrv.reload"),
+    (" language [language:word]", 2, "discordsrv.language"),
+    (" setlanguage [language:word]", 2, "discordsrv.language"),
+    (" lang [language:word]", 2, "discordsrv.language"),
+    (" setlang [language:word]", 2, "discordsrv.language"),
+    (" debugger [action:word] [categories:text]", 2, "discordsrv.debug"),
+    // Any other word (`?`, or a word DiscordSRV answers with "That command doesn't exist!"):
+    // the registered words are literals, so `?` needs a word argument to get through the tree.
+    (" <sub:word> [args:text]", 0, "discordsrv.discord"),
+];
 
 #[derive(Default)]
 struct Mod {
@@ -677,7 +703,12 @@ impl Hooks for Mod {
         Flow::Continue
     }
 
+    fn register(&self, registrar: &mut dyn mod_api::Registrar, _: &mod_api::RegistrationContext) {
+        cmdkit::register(registrar);
+    }
+
     fn player_logged_in(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedInEvent<'_>) {
+        cmdkit::joined(&event.name);
         if is_fake(&*host, event.player) {
             bridge::fake_joined(event.player);
             return;
@@ -701,6 +732,7 @@ impl Hooks for Mod {
     }
 
     fn player_logged_out(&self, host: &mut dyn ServerHost, event: &mut PlayerLoggedOutEvent<'_>) {
+        cmdkit::left(&event.name);
         if bridge::fake_left(event.player) {
             return;
         }
@@ -816,8 +848,8 @@ impl Hooks for Mod {
         // The words after the root: the literals, then the arguments (every usage has them in that order).
         let mut words: Vec<String> = event.command.literals[1..].to_vec();
         for argument in &event.command.arguments {
-            if let CommandArgumentValue::String(text) = &argument.value {
-                words.push(text.clone());
+            if let Some(text) = cmdkit::value_text(&argument.value) {
+                words.push(text);
             }
         }
         let sender = match &event.source {
@@ -878,35 +910,34 @@ impl Hooks for Mod {
         // permissions mod answers. The `<x>.others` forms are checked again inside the bridge.
         // NOTE: `link <player>` takes a word, not a player argument, so an offline player can be
         // linked as DiscordSRV allows.
-        const USAGES: [(&str, u8, &str); 20] = [
-            ("", 0, "discordsrv.discord"),
-            (" help [command:word]", 0, "discordsrv.help"),
-            (" link", 0, "discordsrv.link"),
-            (" link <player:word> <discord:text>", 2, "discordsrv.link.others"),
-            (" linked", 0, "discordsrv.linked"),
-            (" linked <target:text>", 2, "discordsrv.linked.others"),
-            (" unlink", 2, "discordsrv.unlink"),
-            (" unlink <target:text>", 2, "discordsrv.unlink"),
-            (" clearlinked", 2, "discordsrv.unlink"),
-            (" clearlinked <target:text>", 2, "discordsrv.unlink"),
-            (" broadcast <message:text>", 2, "discordsrv.bcast"),
-            (" bcast <message:text>", 2, "discordsrv.bcast"),
-            (" resync", 2, "discordsrv.resync"),
-            (" reload", 2, "discordsrv.reload"),
-            (" language [language:word]", 2, "discordsrv.language"),
-            (" setlanguage [language:word]", 2, "discordsrv.language"),
-            (" lang [language:word]", 2, "discordsrv.language"),
-            (" setlang [language:word]", 2, "discordsrv.language"),
-            (" debugger [action:word] [categories:text]", 2, "discordsrv.debug"),
-            // Any other word (`?`, or a word DiscordSRV answers with "That command doesn't exist!"):
-            // the registered words are literals, so `?` needs a word argument to get through the tree.
-            (" <sub:word> [args:text]", 0, "discordsrv.discord"),
-        ];
         for root in ["discord", "discordsrv"] {
             for (args, level, node_name) in USAGES {
-                event.commands.push(Command::op(&format!("{root}{args}"), level).with_node(&node(node_name)));
+                // The player's name completes from the players online (`cmdkit`), any other name is accepted.
+                let usage = cmdkit::ask_names(&format!("{root}{args}"), ID);
+                event.commands.push(Command::op(&usage, level).with_node(&node(node_name)));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    #[test]
+    fn the_sub_commands_of_the_plugin_are_in_the_tree() {
+        let usages: Vec<String> = USAGES.iter().map(|(args, _, _)| format!("discord{args}")).collect();
+        let paths = cmdkit::literal_paths(&usages);
+        for sub in [
+            "help", "link", "linked", "unlink", "clearlinked", "broadcast", "bcast", "resync", "reload", "language", "setlanguage", "lang",
+            "setlang", "debugger",
+        ] {
+            assert!(paths.iter().any(|p| p == &format!("discord {sub}")), "discord {sub}");
+        }
+        assert_eq!(
+            cmdkit::ask_names("discord link <player:player_name> <discord:text>", ID),
+            "discord link <player:discordsrv:player> <discord:discordsrv:text>"
+        );
     }
 }
 
