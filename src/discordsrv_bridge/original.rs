@@ -72,6 +72,17 @@ pub fn load(dir: &Path) -> Result<Option<Original>, String> {
             root.insert(entry.key.clone(), to_json(&entry.value, &entry.key));
         }
     }
+    // A key with nothing after the colon is a null. The original reads it as an empty list where a list belongs,
+    // and as an unset key (the default) otherwise.
+    let defaults = serde_json::to_value(Config::default()).unwrap_or(Value::Null);
+    let nulls: Vec<String> = root.iter().filter(|(_, v)| v.is_null()).map(|(k, _)| k.clone()).collect();
+    for key in nulls {
+        if defaults.get(&key).is_some_and(Value::is_array) {
+            root.insert(key, Value::Array(Vec::new()));
+        } else {
+            root.remove(&key);
+        }
+    }
     let unported = unported(&root);
     let token = match root.remove(TOKEN_KEY) {
         Some(Value::String(t)) => t.trim().to_string(),
@@ -238,6 +249,18 @@ DiscordChatChannelRoleAliases: {"Developer": "Dev"}
             fs::write(dir.join(file), text).unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn a_list_key_with_nothing_after_the_colon_is_an_empty_list() {
+        let config = format!("{CONFIG}DiscordConsoleChannelBlacklistedCommands:\nDiscordConsoleChannelLevels:\nProxyHost:\nChannelUpdater:\n");
+        let dir = folder("nulllist", &[("config.yml", &config), ("messages.yml", MESSAGES)]);
+        let c = load(&dir).unwrap().unwrap().config;
+        assert!(c.discord_console_channel_blacklisted_commands.is_empty());
+        assert!(c.discord_console_channel_levels.is_empty());
+        assert!(c.chat.channel_updater.is_empty());
+        assert_eq!(c.proxy_host, "");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
