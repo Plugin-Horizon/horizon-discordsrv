@@ -163,6 +163,10 @@ pub fn value(sh: &Shared, uuid: Option<u128>, identifier: &str) -> Option<String
         "user_boost_status" => return Some(boolean(member.boosting)),
         _ => {}
     }
+    if identifier == "user_roles" {
+        let names: Vec<String> = cache.sorted_roles(guild, &member.roles).into_iter().filter(|r| r.id != guild.id && !r.name.trim().is_empty()).map(|r| r.name.clone()).collect();
+        return Some(names.join(", "));
+    }
     if member.roles.is_empty() {
         return Some(String::new());
     }
@@ -283,6 +287,7 @@ mod tests {
         assert_eq!(value(&sh, Some(me), "user_boost_status").as_deref(), Some("yes"));
         assert_eq!(value(&sh, Some(me), "user_top_role_name").as_deref(), Some("Owner"));
         assert_eq!(value(&sh, Some(me), "user_top_role_id").as_deref(), Some("201"));
+        assert!(value(&sh, Some(me), "user_roles").unwrap().split(", ").any(|r| r == "Owner"));
         assert_eq!(value(&sh, Some(me), "user_online_status").as_deref(), Some(""));
         let _ = std::fs::remove_dir_all(dir);
     }
