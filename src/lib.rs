@@ -399,12 +399,17 @@ fn declare_sync_nodes(host: &mut dyn ServerHost) {
     }
 }
 
-/// Discord -> Minecraft group synchronisation: gives or takes a group through the permissions provider.
-/// Horizon has no provider-neutral write (ENGINE_NEEDS `permission_group_write`), so this asks the provider's
-/// console command (LuckPerms' syntax). True when the command ran.
+/// Discord -> Minecraft group synchronisation: gives or takes a group through the permissions provider
+/// (`permission_group_add`/`permission_group_remove`, answered by the mod that provides the selected handler).
+/// When no provider answers (false or an error), the provider's console command (LuckPerms' syntax) is the
+/// fallback. True when a write was applied.
 fn group_write(host: &mut dyn ServerHost, uuid: u128, group: &str, add: bool) -> bool {
     if group.is_empty() || !group.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')) {
         return false;
+    }
+    let answer = if add { host.permission_group_add(uuid, group) } else { host.permission_group_remove(uuid, group) };
+    if matches!(answer, Ok(true)) {
+        return true;
     }
     let command = format!("lp user {} parent {} {group}", bridge::server::uuid_string(uuid), if add { "add" } else { "remove" });
     host.commands().run_command_with_output(&command).success
