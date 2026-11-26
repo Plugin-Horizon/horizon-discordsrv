@@ -481,29 +481,48 @@ fn discord_answer(host: &mut dyn ServerHost, sender: Option<(u128, &str)>, args:
     let has = |node_name: &str, _default_level: u8| granted.get(node_name).copied().unwrap_or(false);
     match bridge::discord_command(uuid, name, args, &has) {
         Some(lines) => lines.iter().map(|line| legacy(&*host, line)).collect(),
-        // The bridge is off (no token, no channel): answer, do not fall through to "unknown command".
-        None => {
-            // A sub-command the sender may not run gets DiscordSRV's permission line first, as the
-            // bridge gives it when it runs.
-            let mut parts = args.split_whitespace();
-            let sub = parts.next().unwrap_or("").to_ascii_lowercase();
-            let given = parts.count();
-            let mut needed: Vec<&str> = Vec::new();
-            if let Some((node_name, _)) = bridge::command_permission(&sub) {
-                needed.push(node_name);
-            }
-            match sub.as_str() {
-                "link" if given >= 2 => needed.push("discordsrv.link.others"),
-                "linked" | "unlink" | "clearlinked" if given >= 1 => needed.push("discordsrv.linked.others"),
-                _ => {}
-            }
-            if needed.iter().any(|node_name| !has(node_name, 0)) {
-                return vec![legacy(&*host, "§cYou do not have permission to perform this command.")];
-            }
-            vec![Text::literal(
-                "DiscordSRV is not connected on this server (it is switched off: no bot token, no channel).",
-            )]
-        }
+        // The bridge is off (no token, no channel): DiscordSRV's `onCommand` answers every sender, with no
+        // permission check, that the bot token is invalid (`invalidBotToken`), not "unknown command".
+        None => off_lines().iter().map(|line| legacy(&*host, line)).collect(),
+    }
+}
+
+/// `DiscordSRV.onCommand` while the plugin is disabled by an invalid (or missing) bot token.
+fn off_lines() -> [&'static str; 2] {
+    [
+        "\u{a7}cDiscordSRV is disabled: your bot token is invalid.",
+        "\u{a7}cPlease enter a valid token into your config.yml (\u{a7}7/plugins/DiscordSRV/config.yml\u{a7}c) and restart your server to get DiscordSRV to work.",
+    ]
+}
+
+#[cfg(test)]
+mod off_tests {
+    use super::off_lines;
+
+    #[test]
+    fn a_disabled_discordsrv_answers_as_the_original() {
+        // Paper: "DiscordSRV is disabled: your bot token is invalid. | Please enter a valid token into your
+        // config.yml (/plugins/DiscordSRV/config.yml) and restart your server to get DiscordSRV to work."
+        let plain: Vec<String> = off_lines()
+            .iter()
+            .map(|l| {
+                let mut out = String::new();
+                let mut chars = l.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\u{a7}' {
+                        chars.next();
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            })
+            .collect();
+        assert_eq!(plain[0], "DiscordSRV is disabled: your bot token is invalid.");
+        assert_eq!(
+            plain[1],
+            "Please enter a valid token into your config.yml (/plugins/DiscordSRV/config.yml) and restart your server to get DiscordSRV to work."
+        );
     }
 }
 
