@@ -24,8 +24,9 @@ const REQUIRED: [&str; 2] = ["config.yml", "messages.yml"];
 const TOKEN_KEY: &str = "BotToken";
 
 /// Maps the port reads as ordered `(key, value)` pairs (`Vec<(String, String)>` in [`Config`]).
-const PAIR_MAPS: [&str; 4] = [
+const PAIR_MAPS: [&str; 5] = [
     "Channels",
+    "Experiment_WebhookChatMessageUsernameFilters",
     "DiscordConsoleChannelFilters",
     "DiscordChatChannelGameFilters",
     "DiscordChatChannelDiscordFilters",
@@ -260,6 +261,22 @@ DiscordChatChannelRoleAliases: {"Developer": "Dev"}
         assert!(c.discord_console_channel_levels.is_empty());
         assert!(c.chat.channel_updater.is_empty());
         assert_eq!(c.proxy_host, "");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_webhook_username_filters_map_keeps_its_order_as_pairs_and_an_empty_map_is_no_pairs() {
+        let config = format!("{CONFIG}Experiment_WebhookChatMessageUsernameFilters: {{\"b\": \"x\", \"a\": \"\"}}\n");
+        let dir = folder("webhookfilters", &[("config.yml", &config), ("messages.yml", MESSAGES)]);
+        let c = load(&dir).unwrap().unwrap().config;
+        assert_eq!(
+            c.chat.experiment_webhook_chat_message_username_filters,
+            vec![("b".to_string(), "x".to_string()), ("a".to_string(), String::new())]
+        );
+        fs::remove_dir_all(dir).unwrap();
+        let config = format!("{CONFIG}Experiment_WebhookChatMessageUsernameFilters: {{}}\n");
+        let dir = folder("webhookempty", &[("config.yml", &config), ("messages.yml", MESSAGES)]);
+        assert!(load(&dir).unwrap().unwrap().config.chat.experiment_webhook_chat_message_username_filters.is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
 
