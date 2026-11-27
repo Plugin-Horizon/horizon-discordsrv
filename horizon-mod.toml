@@ -1,6 +1,6 @@
 id = "discordsrv"
 name = "DiscordSRV"
-version = "0.3.0"
+version = "1.1.0"
 description = "DiscordSRV for Horizon: Discord console channel, chat channels, join/leave/death notices, /discord linking. Off by default (no console channel, no token)."
 authors = ["LionSpacer"]
 api = "0.2"

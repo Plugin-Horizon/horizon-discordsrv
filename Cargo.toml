@@ -4,17 +4,13 @@ version = "0.3.0"
 edition = "2024"
 publish = false
 
-[features]
-# Off by default: the engine's `NodeDefault::Nobody` (horizon-rust/horizon PR #18754, not in the pin).
-# With it, `discordsrv.silentjoin` and `discordsrv.silentquit` default to nobody, as in DiscordSRV.
-horizon_perm_nobody = []
-
 [dependencies]
 # The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command.
 horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
 # The unchanged logic crate (copied from horizon-discordsrv/bridge). Its registry crates are pinned
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 log = "0.4"
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
 regex = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 serde = { version = "1", features = ["derive"] }

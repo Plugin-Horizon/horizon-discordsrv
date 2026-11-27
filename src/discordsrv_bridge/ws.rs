@@ -97,17 +97,54 @@ pub struct Connection {
     pub tcp: TcpStream,
 }
 
-pub fn connect(url: &str) -> Result<Connection, String> {
+/// Asks an HTTP proxy for a tunnel to `host:port` (`CONNECT`, with Basic credentials when set); the
+/// stream is the tunnel afterwards.
+fn tunnel(tcp: &TcpStream, host: &str, port: u16, proxy: &crate::discordsrv_bridge::config::Proxy) -> Result<(), String> {
+    let mut request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
+    if let Some(auth) = proxy.authorization() {
+        request.push_str(&format!("Proxy-Authorization: {auth}\r\n"));
+    }
+    request.push_str("\r\n");
+    let mut stream = tcp;
+    stream.write_all(request.as_bytes()).and_then(|()| stream.flush()).map_err(|e| format!("proxy: {e}"))?;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if head.len() > 16 * 1024 {
+            return Err("proxy: response head too long".into());
+        }
+        match stream.read(&mut byte) {
+            Ok(0) => return Err("proxy: connection closed".into()),
+            Ok(_) => head.push(byte[0]),
+            Err(e) => return Err(format!("proxy: {e}")),
+        }
+    }
+    let head = String::from_utf8_lossy(&head);
+    let status = head.lines().next().unwrap_or_default();
+    if status.split_whitespace().nth(1) != Some("200") {
+        return Err(format!("proxy: {status}"));
+    }
+    Ok(())
+}
+
+pub fn connect(url: &str, proxy: Option<&crate::discordsrv_bridge::config::Proxy>) -> Result<Connection, String> {
     let url = parse_url(url)?;
-    let addr = (url.host.as_str(), url.port)
+    let (target_host, target_port) = match proxy {
+        Some(p) => (p.host.as_str(), p.port),
+        None => (url.host.as_str(), url.port),
+    };
+    let addr = (target_host, target_port)
         .to_socket_addrs()
-        .map_err(|e| format!("resolve {}: {e}", url.host))?
+        .map_err(|e| format!("resolve {target_host}: {e}"))?
         .next()
-        .ok_or_else(|| format!("no address for {}", url.host))?;
+        .ok_or_else(|| format!("no address for {target_host}"))?;
     let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10)).map_err(|e| format!("connect: {e}"))?;
     tcp.set_read_timeout(Some(Duration::from_secs(10))).map_err(|e| e.to_string())?;
     tcp.set_write_timeout(Some(Duration::from_secs(10))).map_err(|e| e.to_string())?;
     let _ = tcp.set_nodelay(true);
+    if let Some(p) = proxy {
+        tunnel(&tcp, &url.host, url.port, p)?;
+    }
     let control = tcp.try_clone().map_err(|e| e.to_string())?;
     let mut stream = if url.tls {
         let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
@@ -204,5 +241,51 @@ mod tests {
     fn nonces_are_16_bytes() {
         let n = base64::engine::general_purpose::STANDARD.decode(nonce()).unwrap();
         assert_eq!(n.len(), 16);
+    }
+
+    #[test]
+    fn a_proxy_tunnel_asks_connect_with_credentials() {
+        use crate::discordsrv_bridge::config::Proxy;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                s.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            s.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").unwrap();
+            String::from_utf8(head).unwrap()
+        });
+        let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let proxy = Proxy { host: "127.0.0.1".into(), port, user: "u".into(), password: "pw".into() };
+        tunnel(&tcp, "gateway.discord.gg", 443, &proxy).unwrap();
+        let request = server.join().unwrap();
+        assert!(request.starts_with("CONNECT gateway.discord.gg:443 HTTP/1.1\r\n"), "{request}");
+        assert!(request.contains("Proxy-Authorization: Basic dTpwdw==\r\n"));
+    }
+
+    #[test]
+    fn a_proxy_that_refuses_is_an_error() {
+        use crate::discordsrv_bridge::config::Proxy;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut byte = [0u8; 1];
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                s.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            s.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n").unwrap();
+        });
+        let tcp = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let proxy = Proxy { host: "127.0.0.1".into(), port, user: String::new(), password: String::new() };
+        let err = tunnel(&tcp, "gateway.discord.gg", 443, &proxy).unwrap_err();
+        server.join().unwrap();
+        assert!(err.contains("407"), "{err}");
     }
 }

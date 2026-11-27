@@ -57,6 +57,20 @@ pub enum Job {
     Delete { channel: String, message: String, after: Duration },
     /// Reactions added to a message, in this order.
     React { channel: String, message: String, emoji: Vec<&'static str> },
+    /// Group -> role synchronisation of these players (groups read by the server thread).
+    Resync {
+        players: std::collections::HashMap<u128, crate::discordsrv_bridge::sync::Groups>,
+        direction: crate::discordsrv_bridge::sync::Direction,
+        /// Whether the nicknames follow too (not on the group timer or an instant group update).
+        nicknames: bool,
+    },
+    /// The nickname timer: nicknames of these players only.
+    Nicknames { players: std::collections::HashMap<u128, crate::discordsrv_bridge::sync::Groups> },
+    /// A Discord account banned (`true`) or unbanned in the main guild.
+    DiscordBan { discord: String, ban: bool },
+    /// An alert of alerts.yml whose conditions held: the message (its `${...}` already written in) goes to
+    /// each channel (a game channel name, a Discord channel name or ID).
+    Alert { channels: Vec<String>, template: crate::discordsrv_bridge::config::MessageTemplate, player: Option<Player>, ping: i64 },
 }
 
 fn no_mentions(content: &str) -> Value {
@@ -64,10 +78,44 @@ fn no_mentions(content: &str) -> Value {
 }
 
 impl Shared {
+    /// The voice module hears the gateway's voice and channel events.
+    fn voice_event(&self, st: &mut State, event: &str, d: &Value) {
+        let mut voice = self.voice.lock().unwrap_or_else(|e| e.into_inner());
+        match event {
+            "VOICE_STATE_UPDATE" => {
+                if let Some((user, old, new)) = st.cache.voice_change.take() {
+                    voice.on_voice_change(&self.config.voice, &st.cache, &st.accounts, &user, old.as_deref(), new.as_deref());
+                }
+            }
+            "CHANNEL_DELETE" => voice.channel_deleted(d["id"].as_str().unwrap_or_default()),
+            _ => {}
+        }
+    }
+
     /// Every gateway dispatch: the guild cache learns from it, and messages go where they belong.
     pub(crate) fn dispatch(&self, event: &str, d: &Value) {
         let mut st = self.lock_state();
+        // A member's roles before the update, to see whether a role edit happened (the members intent).
+        let roles_before = (event == "GUILD_MEMBER_UPDATE")
+            .then(|| d["user"]["id"].as_str().map(|u| (u.to_string(), st.cache.members.get(u).map(|m| m.roles.clone()))))
+            .flatten();
         st.cache.apply(event, d);
+        if let Some((user, before)) = roles_before
+            && self.sync_enabled()
+            && crate::discordsrv_bridge::sync::discord_can_win(&self.config)
+            && before != st.cache.members.get(&user).map(|m| m.roles.clone())
+            && let Some(uuid) = st.accounts.uuid_of(&user)
+        {
+            // GroupSynchronizationManager.onGuildMemberRoleAdd/Remove: their groups follow the roles.
+            self.to_game.lock().unwrap_or_else(|e| e.into_inner()).resync_to_minecraft.push(uuid);
+        }
+        if self.config.voice.enabled {
+            self.voice_event(&mut st, event, d);
+        }
+        if event == "GUILD_BAN_ADD" || event == "GUILD_BAN_REMOVE" {
+            self.discord_ban(&st, event == "GUILD_BAN_ADD", d);
+            return;
+        }
         if event != "MESSAGE_CREATE" {
             return;
         }
@@ -338,16 +386,24 @@ impl Shared {
         if players.is_empty() {
             return strip_codes(&c.discord_chat_channel_list_command_format_no_online_players);
         }
+        // `getOnlinePlayers(true)`: the vanished are not listed.
+        let listed: Vec<Player> = players.iter().filter(|p| !crate::discordsrv_bridge::is_vanished(p.uuid)).cloned().collect();
+        let players = &listed[..];
+        if players.is_empty() {
+            return strip_codes(&c.discord_chat_channel_list_command_format_no_online_players);
+        }
         let count = format!("{}/{}", players.len(), self.server.max_players);
         let head = fill(&c.discord_chat_channel_list_command_format_online_players, &[("playercount", &count)]);
         let mut formatted: Vec<String> = players
             .iter()
             .map(|p| {
                 let world = self.server.world_name(&p.dimension);
+                let alias = crate::discordsrv_bridge::world_alias(&p.dimension, &world);
                 let name = strip_codes(&p.name);
+                let group = crate::discordsrv_bridge::primary_group(p.uuid);
                 fill(
                     &c.discord_chat_channel_list_command_player_format,
-                    &[("displayname", &name), ("username", &p.name), ("primarygroup", ""), ("worldalias", &world), ("world", &world)],
+                    &[("displayname", &name), ("username", &p.name), ("primarygroup", &group), ("worldalias", &alias), ("world", &world)],
                 )
             })
             .collect();
@@ -376,7 +432,7 @@ impl Shared {
         let filled = fill(
             format,
             &[
-                ("playercount", &players.len().to_string()),
+                ("playercount", &players.iter().filter(|p| !crate::discordsrv_bridge::is_vanished(p.uuid)).count().to_string()),
                 ("playermax", &self.server.max_players.to_string()),
                 ("totalplayers", &self.server.total_players().to_string()),
                 ("uptimemins", &(uptime / 60).to_string()),
@@ -395,6 +451,69 @@ impl Shared {
             Err(e) => {
                 log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't send the {what}: {e}");
                 None
+            }
+        }
+    }
+
+    /// Sends an alert: placeholders filled, the channel found as DiscordSRV looks for it (a game channel
+    /// of `Channels`, a Discord channel by name, then by ID), as a bot message or through a webhook.
+    fn run_alert(&self, channels: &[String], template: &crate::discordsrv_bridge::config::MessageTemplate, player: Option<&Player>, ping: i64) {
+        let c = &self.config.chat;
+        let (bot_name, bot_avatar) = {
+            let st = self.lock_state();
+            (st.cache.bot_name.clone(), st.cache.bot_avatar.clone())
+        };
+        let name = player.map(|p| strip_codes(&p.name)).unwrap_or_default();
+        let escaped = escape_markdown(&name);
+        let avatar = match player {
+            Some(p) => embed::avatar_url(&c.avatar_url, &name, p.uuid, 128),
+            None => bot_avatar.clone(),
+        };
+        let world = player.map(|p| self.server.world_name(&p.dimension)).unwrap_or_default();
+        let date = self.date_now();
+        let time = Local::now().format("%H:%M:%S").to_string();
+        let tps = format!("{:.2}", f32::from_bits(self.tps.load(Ordering::Relaxed)).min(20.0));
+        let ping = ping.to_string();
+        let pairs = [
+            ("name", name.as_str()),
+            ("displayname", &escaped),
+            ("username", &escaped),
+            ("usernamenoescapes", &name),
+            ("displaynamenoescapes", &name),
+            ("ping", &ping),
+            ("world", &world),
+            ("tps", &tps),
+            ("time", &time),
+            ("date", &date),
+            ("embedavatarurl", &avatar),
+            ("botavatarurl", &bot_avatar),
+            ("botname", &bot_name),
+        ];
+        let filled = crate::discordsrv_bridge::alerts::map_strings(template, &|s| crate::discordsrv_bridge::alerts::fill_braces(s, &pairs));
+        let Some(mut body) = embed::render(&filled, &pairs, Utc::now().timestamp()) else { return };
+        body["allowed_mentions"] = json!({ "parse": [] });
+        let hook = &filled.webhook;
+        for wanted in channels {
+            let id = c
+                .own_channel(wanted)
+                .map(str::to_string)
+                .or_else(|| self.lock_state().cache.find_channel(wanted).map(str::to_string))
+                .or_else(|| (!wanted.is_empty() && wanted.chars().all(|ch| ch.is_ascii_digit())).then(|| wanted.clone()));
+            let Some(id) = id else {
+                debugger::log("ALERTS", &c.debug, &format!("Not running alert: no target channel was found ({wanted})"));
+                continue;
+            };
+            if hook.enabled || hook.enable {
+                let name_pattern = if hook.name.trim().is_empty() { "%botname%" } else { hook.name.as_str() };
+                let avatar_pattern = if hook.avatar_url.trim().is_empty() { "%botavatarurl%" } else { hook.avatar_url.as_str() };
+                let mut hooked = body.clone();
+                hooked["username"] = json!(fill(name_pattern, &pairs).trim().chars().take(80).collect::<String>());
+                hooked["avatar_url"] = json!(fill(avatar_pattern, &pairs).trim());
+                if let Err(e) = self.rest.execute_webhook(&id, &hooked) {
+                    log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't send the alert as a webhook: {e}");
+                }
+            } else {
+                self.post_logged(&id, &body, "alert");
             }
         }
     }
@@ -467,6 +586,7 @@ impl Shared {
                     }
                 }
             }
+            Job::Alert { channels, template, player, ping } => self.run_alert(&channels, &template, player.as_ref(), ping),
             Job::GameChat { player, message } => {
                 let Some(channel) = c.channel_for("global") else { return };
                 let world = self.server.world_name(&player.dimension);
@@ -475,6 +595,8 @@ impl Shared {
                     self.webhook_chat(channel, &player, &message, &world, &date);
                     return;
                 }
+                let group = crate::discordsrv_bridge::primary_group(player.uuid);
+                let alias = crate::discordsrv_bridge::world_alias(&player.dimension, &world);
                 let content = {
                     let st = self.lock_state();
                     let m = GameChat {
@@ -482,9 +604,9 @@ impl Shared {
                         // No display name helper (GAPS.md): the name.
                         display_name: &player.name,
                         message: &message,
-                        // No permissions/groups API between mods (GAPS.md).
-                        primary_group: "",
+                        primary_group: &group,
                         world: &world,
+                        world_alias: &alias,
                         date: &date,
                         channel: "global",
                     };
@@ -518,7 +640,33 @@ impl Shared {
                     }
                 }
             }
+            Job::Nicknames { players } => self.sync_nicknames_of(&players),
+            Job::Resync { players, direction, nicknames } => {
+                let changed = self.resync_players(&players, direction, nicknames);
+                log::info!(target: "horizon_discordsrv", "[DiscordSRV] Group synchronization finished: {} players, {changed} changed", players.len());
+            }
+            Job::DiscordBan { discord, ban } => {
+                let guild = {
+                    let st = self.lock_state();
+                    self.config.chat.channel_for("global").and_then(|ch| st.cache.guild_of_channel(ch)).map(|g| g.id.clone())
+                };
+                if let Some(guild) = guild {
+                    let result = if ban {
+                        self.rest.ban_member(&guild, &discord)
+                    } else {
+                        self.rest.unban_member(&guild, &discord)
+                    };
+                    match result {
+                        Ok(()) if ban => log::info!(target: "horizon_discordsrv", "[DiscordSRV] Banned a linked Discord account because the player is banned on the server"),
+                        Ok(()) => log::info!(target: "horizon_discordsrv", "[DiscordSRV] Unbanned a linked Discord account because the player is not banned on the server"),
+                        Err(e) => log::debug!(target: "horizon_discordsrv", "[DiscordSRV] Ban synchronization: {e}"),
+                    }
+                }
+            }
             Job::Linked { discord, discord_name, uuid, name } => {
+                if c.group_role_synchronization_on_link && self.sync_enabled() {
+                    self.to_game.lock().unwrap_or_else(|e| e.into_inner()).resync.push(uuid);
+                }
                 self.role(&discord, true);
                 self.link_commands(&c.minecraft_discord_account_linked_console_commands, &discord, &discord_name, uuid, &name);
             }
@@ -534,6 +682,8 @@ impl Shared {
     /// The linked Discord member, when there is one, names the message and gives its avatar if asked.
     fn webhook_chat(&self, channel: &str, player: &Player, message: &str, world: &str, date: &str) {
         let c = &self.config.chat;
+        let group = crate::discordsrv_bridge::primary_group(player.uuid);
+        let alias = crate::discordsrv_bridge::world_alias(&player.dimension, world);
         let built = {
             let st = self.lock_state();
             let member = st.accounts.discord_of(player.uuid).and_then(|id| st.cache.members.get(id)).cloned();
@@ -541,9 +691,9 @@ impl Shared {
                 username: &player.name,
                 display_name: &player.name,
                 message,
-                // No permissions/groups API between mods (GAPS.md).
-                primary_group: "",
+                primary_group: &group,
                 world,
+                world_alias: &alias,
                 date,
                 channel: "global",
             };
@@ -565,6 +715,47 @@ impl Shared {
         });
         if let Err(e) = self.rest.execute_webhook(channel, &body) {
             log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't send the chat message as a webhook: {e}");
+        }
+    }
+
+    /// `DiscordBanListener`: a Discord ban of a linked account bans the player on the server, an unban
+    /// pardons them (`BanSynchronizationDiscordToMinecraft`). The commands run on the server thread.
+    fn discord_ban(&self, st: &State, banned: bool, d: &Value) {
+        let c = &self.config.chat;
+        if !c.ban_synchronization_discord_to_minecraft {
+            return;
+        }
+        let Some(user) = d["user"]["id"].as_str() else { return };
+        let Some(uuid) = st.accounts.uuid_of(user) else { return };
+        let Some(name) = crate::discordsrv_bridge::commands::known_name(st, &self.server, uuid) else { return };
+        let command = if banned {
+            let reason = crate::discordsrv_bridge::console::strip_colors(&crate::discordsrv_bridge::format::translate_ampersand(
+                &c.ban_synchronization_discord_to_minecraft_reason,
+            ));
+            format!("ban {name} {reason}")
+        } else {
+            format!("pardon {name}")
+        };
+        self.commands.lock().unwrap_or_else(|e| e.into_inner()).push_back(command);
+    }
+
+    /// `BanSynchronizationMinecraftToDiscord`: the linked account of a banned player is banned.
+    pub(crate) fn minecraft_ban(&self, uuid: u128) {
+        if !self.config.chat.ban_synchronization_minecraft_to_discord {
+            return;
+        }
+        if let Some(discord) = self.lock_state().accounts.discord_of(uuid).map(str::to_string) {
+            self.push_job(Job::DiscordBan { discord, ban: true });
+        }
+    }
+
+    /// A player who can join is not banned on the server: their Discord ban is lifted.
+    pub(crate) fn minecraft_unban(&self, uuid: u128) {
+        if !self.config.chat.ban_synchronization_minecraft_to_discord {
+            return;
+        }
+        if let Some(discord) = self.lock_state().accounts.discord_of(uuid).map(str::to_string) {
+            self.push_job(Job::DiscordBan { discord, ban: false });
         }
     }
 
@@ -629,6 +820,8 @@ pub fn chat_loop(shared: &Shared) {
     let mut next_topic = Instant::now() + Duration::from_secs(5);
     let mut next_names: Vec<Instant> = c.channel_updater.iter().map(|_| Instant::now() + Duration::from_secs(5)).collect();
     let mut watchdog_fired = false;
+    let mut next_counts = Instant::now();
+    let mut next_refresh = Instant::now() + Duration::from_secs(60);
     loop {
         let stopping = shared.stop.load(Ordering::Relaxed);
         shared.drain_jobs(&mut expiring);
@@ -649,7 +842,35 @@ pub fn chat_loop(shared: &Shared) {
             let _ = shared.rest.delete_message(&channel, &id);
         }
 
+        if !stopping && now >= next_refresh {
+            // Links other servers made in the shared JDBC table.
+            next_refresh = now + Duration::from_secs(60);
+            if let Err(e) = shared.lock_state().accounts.refresh() {
+                log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Couldn't read the JDBC links: {e}");
+            }
+        }
         let players = shared.lock_state().players.clone();
+        if !stopping && now >= next_counts && shared.counts_wanted.swap(false, Ordering::Relaxed) {
+            // `guild_members_online`: the guild's approximate counts, asked for once a minute at most.
+            next_counts = now + Duration::from_secs(60);
+            let guild = {
+                let st = shared.lock_state();
+                main.as_deref().and_then(|ch| st.cache.guild_of_channel(ch)).or_else(|| st.cache.single_guild()).map(|g| g.id.clone())
+            };
+            if let Some(guild) = guild {
+                match shared.rest.guild_counts(&guild) {
+                    Ok((online, total)) => {
+                        if let Some(g) = shared.lock_state().cache.guilds.get_mut(&guild) {
+                            g.online = Some(online);
+                            if total > 0 {
+                                g.member_count = total;
+                            }
+                        }
+                    }
+                    Err(e) => log::debug!(target: "horizon_discordsrv", "[DiscordSRV] Member counts: {e}"),
+                }
+            }
+        }
         let topic = &c.channel_topic_updater_chat_channel_topic_format;
         if !stopping && now >= next_topic {
             if let Some(channel) = main.as_deref().filter(|_| !topic.is_empty())
