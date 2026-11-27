@@ -4,6 +4,7 @@
 //! canned responses, topics and channel names, the watchdog), account linking, and the bot's
 //! presence. Everything that touches the network runs on threads of its own; the server thread
 //! hands over its TPS, its players and the game's events, and takes queued commands and lines.
+pub mod alerts;
 pub mod chat;
 pub mod commands;
 pub mod config;
@@ -14,16 +15,21 @@ pub mod feed;
 pub mod format;
 pub mod gateway;
 pub mod guild;
+pub mod jdbc;
 pub mod linking;
 pub mod original;
+pub mod placeholders;
 pub mod relay;
+pub mod requirelink;
 pub mod rest;
 pub mod server;
+pub mod sync;
+pub mod voice;
 pub mod ws;
 pub mod yaml;
 
 use std::path::PathBuf;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -80,6 +86,12 @@ pub struct Shared {
     state: Mutex<State>,
     jobs: Mutex<VecDeque<relay::Job>>,
     to_game: Mutex<TickWork>,
+    /// The parsed `Alerts` (alerts.yml).
+    alerts: Vec<alerts::Alert>,
+    /// The voice module's networks (voice.yml); idle when `Voice enabled` is off.
+    voice: Mutex<voice::Voice>,
+    /// A placeholder asked for the member count: the chat thread fetches it from Discord about once a minute.
+    counts_wanted: AtomicBool,
 }
 
 /// What the gateway and the game told, guarded together.
@@ -107,6 +119,21 @@ pub struct TickWork {
     /// Names of the players a Discord message mentioned as `@name` (`MinecraftMentionSound`): they
     /// hear the note-block pling.
     pub mentions: Vec<String>,
+    /// Players to kick, with the `§`-coded text: they unlinked while linking is required.
+    pub kicks: Vec<(u128, String)>,
+    /// A `/discord resync`, a new link or the cycle timer wants the groups of these players
+    /// (every linked player when `resync_all`).
+    pub resync: Vec<u128>,
+    pub resync_all: bool,
+    /// The group timer's players (`GroupRoleSynchronizationCycleCompletely`: all linked): groups only, no nicknames.
+    pub resync_cycle: Vec<u128>,
+    /// The nickname timer's players (`NicknameSynchronizationCycleTime`): nicknames only.
+    pub resync_nicknames: Vec<u128>,
+    /// A Discord role edit wants the groups of these players to follow (Discord decides).
+    pub resync_to_minecraft: Vec<u128>,
+    /// Groups to give (`true`) or take from a player: Discord -> Minecraft synchronisation. The server
+    /// thread writes them through the permissions provider.
+    pub group_writes: Vec<(u128, String, bool)>,
 }
 
 /// The players of `names` that `message` mentions as `@name`, as `PlayerUtil.notifyPlayersOfMentions`
@@ -346,9 +373,23 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
     };
     let home = config_dir.parent().map(Path::to_path_buf).unwrap_or_default();
     let accounts_file = if config.chat.accounts_file.trim().is_empty() { "accounts.aof" } else { &config.chat.accounts_file };
-    let accounts = linking::Accounts::load(dir.join(accounts_file));
+    let accounts = match jdbc::connect(&config).and_then(|store| match store {
+        Some(store) => linking::Accounts::with_store(dir.join(accounts_file), store).map(Some),
+        None => Ok(None),
+    }) {
+        Ok(Some(a)) => {
+            log::info!(target: "horizon_discordsrv", "[DiscordSRV] Account links are kept in the JDBC database");
+            a
+        }
+        Ok(None) => linking::Accounts::load(dir.join(accounts_file)),
+        Err(e) => {
+            log::error!(target: "horizon_discordsrv", "[DiscordSRV] Not using JDBC: {e}");
+            linking::Accounts::load(dir.join(accounts_file))
+        }
+    };
+    let alert_list = build_alerts(&config);
     let shared = Arc::new(Shared {
-        rest: rest::Rest::new(&config.api_base_url, &token),
+        rest: rest::Rest::with_proxy(&config.api_base_url, &token, config.proxy().as_ref()),
         config,
         token,
         stop: AtomicBool::new(false),
@@ -377,6 +418,9 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
         }),
         jobs: Mutex::new(VecDeque::new()),
         to_game: Mutex::new(TickWork::default()),
+        alerts: alert_list,
+        voice: Mutex::new(voice::Voice::default()),
+        counts_wanted: AtomicBool::new(false),
     });
     let mut threads = Vec::new();
     {
@@ -403,6 +447,10 @@ fn start_inner(slot: &mut Option<Running>, config_dir: &Path, server_version: St
         let s = Arc::clone(&shared);
         threads.push(std::thread::Builder::new().name("DiscordSRV - Chat".into()).spawn(move || relay::chat_loop(&s)));
         log::info!(target: "horizon_discordsrv", "[DiscordSRV] Chat bridge started ({} channels)", shared.config.chat.channels.len());
+    }
+    if shared.config.voice.enabled {
+        let s = Arc::clone(&shared);
+        threads.push(std::thread::Builder::new().name("DiscordSRV - Voice".into()).spawn(move || voice::run(&s)));
     }
     let threads: Vec<JoinHandle<()>> = threads.into_iter().filter_map(Result::ok).collect();
     *slot = Some(Running { shared, threads });
@@ -436,6 +484,20 @@ pub fn tick(tps: f32, players: impl FnOnce() -> Vec<Player>) -> TickWork {
             }
         }
     }
+    if sh.sync_enabled() && sync::cycle_due(sh.config.chat.group_role_synchronization_cycle_time.max(1)) {
+        // GroupRoleSynchronizationCycleTime: the players on the server, or every linked player with
+        // GroupRoleSynchronizationCycleCompletely.
+        if sh.config.chat.group_role_synchronization_cycle_completely {
+            work.resync_cycle.extend(sh.linked_uuids());
+        } else {
+            let online: Vec<u128> = sh.lock_state().players.iter().map(|p| p.uuid).collect();
+            work.resync_cycle.extend(online);
+        }
+    }
+    if sh.config.chat.nickname_synchronization_enabled && sync::nickname_cycle_due(sh.config.chat.nickname_synchronization_cycle_time) {
+        let online: Vec<u128> = sh.lock_state().players.iter().map(|p| p.uuid).collect();
+        work.resync_nicknames.extend(online);
+    }
     work.commands.extend(sh.commands.lock().map(|mut q| q.drain(..).collect::<Vec<_>>()).unwrap_or_default());
     work.console.extend(sh.console_queue.lock().map(|mut q| q.drain(..).collect::<Vec<_>>()).unwrap_or_default());
     work
@@ -466,27 +528,112 @@ pub fn player_login(uuid: u128) {
     }
 }
 
+/// The alerts of the config, with a line for each one that cannot work.
+fn build_alerts(config: &Config) -> Vec<alerts::Alert> {
+    let mut warnings = Vec::new();
+    let list = alerts::parse(&config.chat.alerts, &mut warnings);
+    for w in warnings {
+        log::warn!(target: "horizon_discordsrv", "[DiscordSRV] {w}");
+    }
+    if !list.is_empty() {
+        log::info!(target: "horizon_discordsrv", "[DiscordSRV] {} alert{} registered", list.len(), if list.len() == 1 { "" } else { "s" });
+    }
+    list
+}
+
+/// The Bukkit world name of a dimension (`world`, `world_nether`, `world_the_end`), for the alerts' `{world}`.
+pub fn world_name(dimension: &str) -> String {
+    shared().map(|sh| sh.server.world_name(dimension)).unwrap_or_else(|| dimension.to_string())
+}
+
+/// Whether any alert is configured (the glue builds an event only then).
+pub fn alerts_on() -> bool {
+    shared().is_some_and(|sh| !sh.alerts.is_empty())
+}
+
+/// A game event for the alerts: each alert it triggers has its conditions and `${...}` evaluated here, on
+/// the server thread (they may ask the game), and its message queued for the chat thread.
+pub fn alert_event(ev: &alerts::Event, player: Option<Player>, ping: i64) {
+    let Some(sh) = shared() else { return };
+    for alert in sh.alerts.iter().filter(|a| alerts::triggered(a, ev)) {
+        let mut log = Vec::new();
+        let template = alerts::prepare(alert, ev, &mut log);
+        for line in log {
+            log::error!(target: "horizon_discordsrv", "[DiscordSRV] {line}");
+        }
+        if let Some(template) = template {
+            sh.push_job(relay::Job::Alert { channels: alert.channels.clone(), template, player: player.clone(), ping });
+        }
+    }
+}
+
+/// Whether the login check is on (the glue then reads the whitelist and the ban list for it).
+pub fn login_check_on() -> bool {
+    shared().is_some_and(|sh| sh.config.chat.require_linked_account_to_play.enabled)
+}
+
 /// `Require linked account to play`: the kick text of a login that must be refused, None to let the
-/// player in. Bypass names and an off rule let everyone in; so does a player whose account is linked.
-pub fn login_refusal(uuid: u128, name: &str) -> Option<String> {
+/// player in. `whitelisted` and `banned` are the server's answers for the player (vanilla whitelist,
+/// name ban list). The rules and their order are [`requirelink::decide`]'s; the Discord questions
+/// (membership, roles) are asked of the REST API here, as DiscordSRV's `.complete()` calls are.
+pub fn login_refusal(uuid: u128, name: &str, whitelisted: bool, banned: bool) -> Option<String> {
     let sh = shared()?;
     let rule = &sh.config.chat.require_linked_account_to_play;
-    if !rule.enabled || rule.bypass_names.iter().any(|b| b.eq_ignore_ascii_case(name)) {
+    if !rule.enabled {
         return None;
     }
-    if !sh.ready.load(Ordering::Relaxed) {
-        let text = rule.messages.still_starting.as_str();
-        let text = if text.trim().is_empty() { STILL_STARTING } else { text };
-        return Some(text.to_string());
+    let bot_name = sh.lock_state().cache.bot_name.clone();
+    let facts = requirelink::Facts {
+        name,
+        whitelisted,
+        banned,
+        ready: sh.ready.load(Ordering::Relaxed),
+        bot_name: &bot_name,
+        invite: &sh.config.chat.discord_invite_link,
+    };
+    let mut live = LiveDiscord { sh: &sh, uuid, name };
+    let mut log = Vec::new();
+    let text = requirelink::decide(rule, &facts, &mut live, &mut log);
+    for line in log {
+        if line.starts_with("Failed to check player") || line.starts_with("Tried to authenticate") {
+            log::warn!(target: "horizon_discordsrv", "[DiscordSRV] {line}");
+        } else {
+            debugger::log("REQUIRE_LINK", &sh.config.chat.debug, &line);
+        }
     }
-    let mut st = sh.lock_state();
-    if st.accounts.discord_of(uuid).is_some() {
-        return None;
+    text
+}
+
+/// `noticePlayerUnlink`'s exceptions for a player who unlinked: false when the whitelist bypass holds
+/// or only banned players need to link and this one is not banned.
+pub fn unlink_kick_applies(whitelisted: bool, banned: bool) -> bool {
+    shared().is_some_and(|sh| requirelink::unlink_kick_applies(&sh.config.chat.require_linked_account_to_play, whitelisted, banned))
+}
+
+/// The Discord side of a login check, over the live link file, the guild cache and the REST API.
+struct LiveDiscord<'a> {
+    sh: &'a Shared,
+    uuid: u128,
+    name: &'a str,
+}
+
+impl requirelink::Discord for LiveDiscord<'_> {
+    fn linked(&mut self) -> Option<String> {
+        self.sh.lock_state().accounts.discord_of(self.uuid).map(|d| d.to_string())
     }
-    let code = st.accounts.new_code(uuid, name);
-    let template = rule.not_linked_message.as_str();
-    let template = if template.trim().is_empty() { NOT_LINKED } else { template };
-    Some(not_linked_text(template, &st.cache.bot_name, &code, &sh.config.chat.discord_invite_link))
+    fn new_code(&mut self) -> String {
+        self.sh.lock_state().accounts.new_code(self.uuid, self.name)
+    }
+    fn bot_guilds(&self) -> Vec<String> {
+        self.sh.lock_state().cache.guilds.keys().cloned().collect()
+    }
+    fn role_guild(&self, role: &str) -> Option<String> {
+        let st = self.sh.lock_state();
+        st.cache.guilds.values().find(|g| g.roles.contains_key(role)).map(|g| g.id.clone())
+    }
+    fn member_roles(&mut self, guild: &str, user: &str) -> Result<Option<Vec<String>>, String> {
+        self.sh.rest.member_roles(guild, user)
+    }
 }
 
 /// DiscordSRV's default kick texts (linking.yml, `&` codes).
@@ -528,6 +675,163 @@ pub fn player_join(uuid: u128, name: &str, message: &str, silent: bool) {
 pub fn player_leave(uuid: u128, name: &str, message: &str, silent: bool) {
     if let Some(sh) = shared() {
         sh.join_notice_leave(uuid, name, message, silent);
+    }
+}
+
+/// What other mods say about a player: the permissions provider's primary group (Vault's `getPrimaryGroup`)
+/// and whether a vanish mod hides them (`PlayerUtil.isVanished`). Read on the server thread.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Extra {
+    pub primary_group: String,
+    pub vanished: bool,
+}
+
+/// The players' [`Extra`]s and the world aliases (a Multiverse alias by dimension), refreshed about once a second.
+/// A static of their own: the server thread sets them from inside the player snapshot, which holds the state lock.
+#[derive(Debug, Default)]
+struct Extras {
+    players: HashMap<u128, Extra>,
+    aliases: HashMap<String, String>,
+}
+
+static EXTRAS: Mutex<Option<Extras>> = Mutex::new(None);
+
+fn extras<T>(f: impl FnOnce(&mut Extras) -> T) -> T {
+    f(EXTRAS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Extras::default))
+}
+
+/// The server thread's view of the other mods, for the player list, the nickname synchronisation and the join notices.
+pub fn set_player_extras(players: HashMap<u128, Extra>, aliases: HashMap<String, String>) {
+    extras(|e| {
+        e.players = players;
+        e.aliases = aliases;
+    });
+}
+
+/// A vanish mod hides the player (`PlayerUtil.isVanished`), as of the last snapshot.
+pub fn is_vanished(uuid: u128) -> bool {
+    extras(|e| e.players.get(&uuid).is_some_and(|x| x.vanished))
+}
+
+/// The player's primary group, empty when no provider publishes one.
+pub fn primary_group(uuid: u128) -> String {
+    extras(|e| e.players.get(&uuid).map(|x| x.primary_group.clone()).unwrap_or_default())
+}
+
+/// The alias a world mod gives the dimension; the world name when it gives none (`DiscordSRV#getWorldAlias`).
+pub fn world_alias(dimension: &str, world: &str) -> String {
+    extras(|e| e.aliases.get(dimension).filter(|a| !a.trim().is_empty()).cloned()).unwrap_or_else(|| world.to_string())
+}
+
+/// The groups of players for the synchronisation (`TickWork::resync`), read on the server thread:
+/// the Discord roles are changed on the chat thread.
+pub fn resync(players: HashMap<u128, sync::Groups>, direction: sync::Direction) {
+    if let Some(sh) = shared() {
+        sh.push_job(relay::Job::Resync { players, direction, nicknames: true });
+    }
+}
+
+/// The group timer's batch: roles only (the nickname timer has its own cycle).
+pub fn resync_groups_only(players: HashMap<u128, sync::Groups>) {
+    if let Some(sh) = shared() {
+        sh.push_job(relay::Job::Resync { players, direction: sync::Direction::Authoritative, nicknames: false });
+    }
+}
+
+/// The nickname timer's batch.
+pub fn resync_nicknames(players: HashMap<u128, sync::Groups>) {
+    if let Some(sh) = shared() {
+        sh.push_job(relay::Job::Nicknames { players });
+    }
+}
+
+/// The permissions provider published other groups for a player (DiscordSRV's LuckPerms hook, instant
+/// group updates): their roles follow at once when the group synchronisation is on.
+pub fn groups_changed(uuid: u128, groups: sync::Groups) {
+    if !hook_enabled("LuckPerms-GroupUpdates") {
+        return;
+    }
+    if let Some(sh) = shared()
+        && sh.sync_enabled()
+        && sh.lock_state().accounts.discord_of(uuid).is_some()
+    {
+        sh.push_job(relay::Job::Resync { players: HashMap::from([(uuid, groups)]), direction: sync::Direction::ToDiscord, nicknames: false });
+    }
+}
+
+/// The groups of `GroupRoleSynchronizationGroupsAndRolesToSync` (those with a real role) and whether
+/// `GroupRoleSynchronizationEnableDenyPermission` is on: the server declares `discordsrv.sync.<group>` for each.
+pub fn sync_group_names() -> (Vec<String>, bool) {
+    let Some(sh) = shared() else { return (Vec::new(), false) };
+    let c = &sh.config.chat;
+    let mut names: Vec<String> = c
+        .group_role_synchronization_groups_and_roles_to_sync
+        .iter()
+        .filter(|(g, r)| !g.trim().is_empty() && r.replace('0', "").trim().chars().any(|ch| ch.is_ascii_digit()))
+        .map(|(g, _)| g.trim().to_string())
+        .collect();
+    names.sort();
+    (names, c.group_role_synchronization_enable_deny_permission)
+}
+
+/// Whether a plugin hook is in use: not named in `DisabledPluginHooks` (case does not matter; `LuckPerms` also
+/// switches off `LuckPerms-GroupUpdates` and `LuckPerms-Contexts`). Hooks are on while the bridge is off.
+pub fn hook_enabled(name: &str) -> bool {
+    let Some(sh) = shared() else { return true };
+    let base = name.split('-').next().unwrap_or(name);
+    !sh.config.disabled_plugin_hooks.iter().any(|d| d.trim().eq_ignore_ascii_case(name) || d.trim().eq_ignore_ascii_case(base))
+}
+
+/// The value of `%discordsrv_<identifier>%` for a player (`discordsrv:placeholder`): see [`placeholders`].
+pub fn placeholder(uuid: Option<u128>, identifier: &str) -> Option<String> {
+    if !hook_enabled("PlaceholderAPI") {
+        return None;
+    }
+    placeholders::value(&*shared()?, uuid, identifier)
+}
+
+/// The LuckPerms contexts for a player (`discordsrv:contexts`): key and value pairs, see [`placeholders::contexts`].
+pub fn contexts(uuid: u128) -> Vec<(String, String)> {
+    if !hook_enabled("LuckPerms-Contexts") {
+        return Vec::new();
+    }
+    shared().map(|sh| placeholders::contexts(&sh, uuid)).unwrap_or_default()
+}
+
+/// Game ticks between the server thread's voice position samples, when the voice module runs.
+pub fn voice_every() -> Option<u64> {
+    shared().filter(|sh| sh.config.voice.enabled).map(|sh| sh.config.voice.tick_speed.max(1))
+}
+
+/// The server's players with their positions, for the voice module (every [`voice_every`] ticks).
+pub fn voice_players(players: Vec<(u128, voice::VoicePlayer)>) {
+    if let Some(sh) = shared()
+        && sh.config.voice.enabled
+    {
+        sh.voice.lock().unwrap_or_else(|e| e.into_inner()).update_players(players);
+    }
+}
+
+/// The UUIDs of every linked player (for `/discord resync`).
+pub fn linked_uuids() -> Vec<u128> {
+    shared().map(|sh| sh.linked_uuids()).unwrap_or_default()
+}
+
+/// A player was banned or pardoned on the server (`BanSynchronizationMinecraftToDiscord`): a ban
+/// bans their linked Discord account.
+pub fn minecraft_ban(uuid: u128, banned: bool) {
+    if let Some(sh) = shared()
+        && banned
+    {
+        sh.minecraft_ban(uuid);
+    }
+}
+
+/// A player joined, so no ban stands on the server: the linked Discord account is unbanned
+/// (`PlayerBanListener.onPlayerJoin`).
+pub fn minecraft_unban_on_join(uuid: u128) {
+    if let Some(sh) = shared() {
+        sh.minecraft_unban(uuid);
     }
 }
 
@@ -624,6 +928,9 @@ impl Shared {
             }),
             jobs: Mutex::new(VecDeque::new()),
             to_game: Mutex::new(TickWork::default()),
+            alerts: Vec::new(),
+            voice: Mutex::new(voice::Voice::default()),
+            counts_wanted: AtomicBool::new(false),
         }
     }
 

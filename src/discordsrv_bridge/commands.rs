@@ -285,10 +285,19 @@ impl Shared {
             "link" => self.cmd_link(uuid, name, rest, has),
             "linked" => self.cmd_linked(uuid, rest, has),
             "reload" => reload_lines(),
-            "resync" => vec![RESYNC_DISABLED.to_string()],
+            "resync" => self.cmd_resync(),
             _ => self.cmd_unlink(uuid, name, rest, has),
         };
         lines.iter().map(|l| translate_ampersand(l)).collect()
+    }
+
+    /// `CommandResync`: asks the server thread (which reads the groups) for a full synchronisation.
+    fn cmd_resync(&self) -> Vec<String> {
+        if !self.sync_enabled() {
+            return vec![RESYNC_DISABLED.to_string()];
+        }
+        self.to_game.lock().unwrap_or_else(|e| e.into_inner()).resync_all = true;
+        vec!["&bFull group synchronization triggered.".to_string()]
     }
 
     /// `/discord link` (a code) or `/discord link <player> <discord user>` (staff).
@@ -509,6 +518,18 @@ impl Shared {
     fn unlink_player(&self, st: &mut State, uuid: u128, name: Option<String>) {
         match st.accounts.unlink(uuid) {
             Ok(Some(discord)) => {
+                // RequireLinkModule.noticePlayerUnlink: a player the link requirement covers is kicked.
+                let require = &self.config.chat.require_linked_account_to_play;
+                let bypass = st.players.iter().find(|p| p.uuid == uuid).is_some_and(|p| require.bypass_names.contains(&p.name));
+                if require.enabled && !bypass {
+                    let text = if require.messages.kicked_for_unlinking.is_empty() {
+                        crate::discordsrv_bridge::config::KICKED_FOR_UNLINKING
+                    } else {
+                        require.messages.kicked_for_unlinking.as_str()
+                    };
+                    let line = crate::discordsrv_bridge::format::translate_ampersand(text);
+                    self.to_game.lock().unwrap_or_else(|e| e.into_inner()).kicks.push((uuid, line));
+                }
                 self.push_job(Job::Unlinked { discord, uuid, name: name.unwrap_or_else(|| uuid_string(uuid)) });
             }
             Ok(None) => {}
@@ -535,6 +556,9 @@ impl Shared {
         let mut text = text_args.join(" ").replace("\\n", "\n");
         if c.discord_chat_channel_translate_mentions {
             text = chat::translate_mentions(c, &st.cache, &text);
+        }
+        if c.reserializer_in_broadcast {
+            text = crate::discordsrv_bridge::format::legacy_to_markdown(&text);
         }
         if let Some(channel) = target
             && !text.trim().is_empty()

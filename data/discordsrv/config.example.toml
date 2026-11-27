@@ -89,6 +89,7 @@ Experiment_WebhookChatMessageDelivery = false
 Experiment_WebhookChatMessageUsernameFormat = "%displayname%"
 Experiment_WebhookChatMessageFormat = "%message%"
 Experiment_WebhookChatMessageUsernameFromDiscord = false
+Experiment_WebhookChatMessageUsernameFilters = []
 Experiment_WebhookChatMessageAvatarFromDiscord = false
 DiscordChatChannelBlockedIds = []
 DiscordChatChannelBlockedRolesAsWhitelist = false
@@ -188,6 +189,21 @@ MinecraftNobodyFound = "&cNobody found with Discord ID/Discord name/Minecraft na
 # death: %deathmessage% %world%; advancement: %achievement% %world%.
 # Embed Fields entries are "title;value;inline" or "blank"; Timestamp is true or an epoch second.
 
+# Group -> role synchronisation (synchronization.yml). Minecraft is authoritative: the Discord roles
+# follow the groups a permission mod publishes (a role ID of only zeros is skipped). Discord -> Minecraft
+# group changes are not possible from a mod.
+GroupRoleSynchronizationGroupsAndRolesToSync = {}
+GroupRoleSynchronizationMinecraftIsAuthoritative = true
+GroupRoleSynchronizationOneWay = false
+GroupRoleSynchronizationPrimaryGroupOnly = false
+GroupRoleSynchronizationOnLink = true
+GroupRoleSynchronizationCycleTime = 5
+GroupRoleSynchronizationCycleCompletely = false
+NicknameSynchronizationCycleTime = 3
+# Ban synchronisation. The Discord -> Minecraft reason takes & colour codes (stripped for the ban list).
+BanSynchronizationDiscordToMinecraft = false
+BanSynchronizationMinecraftToDiscord = false
+
 [MinecraftPlayerJoinMessage]
 Enabled = true
 Content = ""
@@ -235,11 +251,66 @@ Timestamp = false
 
 # Require linked account to play (linking.yml). Off: anyone may log in. On: an unlinked player is
 # refused with the kick text; {BOT}, {CODE} and {INVITE} are filled in. Empty texts use the defaults.
-# The membership, subscriber role, whitelist and ban checks of DiscordSRV are not ported.
+# A player who unlinks is kicked with "Kicked for unlinking" (default text when empty).
+# The checks run in DiscordSRV's order: bypass names, vanilla whitelist, banned players, the link,
+# membership of the Discord server(s), the subscriber roles. IP bans are not looked at (the login
+# hook has no address). "Listener priority" and "Listener event" are read and have no effect.
 ["Require linked account to play"]
 Enabled = false
 "Bypass names" = []
+"Whitelisted players bypass check" = true
+"Check banned players" = false
+"Only check banned players" = false
 "Not linked message" = ""
+# true: in a Discord server the bot is in; false: no check; "<server id>" or ["<id>", ...]: all of them.
+"Must be in Discord server" = true
+
+["Require linked account to play"."Subscriber role"]
+"Require subscriber role to join" = false
+"Subscriber roles" = []
+"Require all of the listed roles" = false
+"Kick message" = ""
 
 ["Require linked account to play".Messages]
 "DiscordSRV still starting" = ""
+"Kicked for unlinking" = ""
+"Not in server" = ""
+"Failed to find subscriber role" = ""
+"Failed for unknown reason" = ""
+
+# Alerts (alerts.yml): a message to Discord when something happens. Triggers: PlayerJoinEvent,
+# PlayerQuitEvent, PlayerDeathEvent, PlayerAdvancementDoneEvent, AsyncPlayerChatEvent or AsyncChatEvent,
+# PlayerCommandPreprocessEvent, ServerCommandEvent, or "/command". Conditions and ${...} use a small
+# expression language (see README). The message sections are the ones of the join notice.
+#
+# [[Alerts]]
+# Trigger = "/gamemode"
+# Channel = "main"
+# Conditions = ["#args.size() > 0"]
+# [Alerts.Embed]
+# Color = "#ff0000"
+# [Alerts.Embed.Author]
+# ImageUrl = "{embedavatarurl}"
+# Name = "{username} changed gamemode to ${#args.get(0)}"
+
+# Voice (voice.yml): players near each other are put in a shared Discord voice channel, everyone else waits in the lobby.
+# The bot needs View Channel and Move Members in the lobby, and View Channel, Move Members, Manage Permissions and
+# Manage Channels in the category.
+#
+# "Voice enabled" = true
+# "Tick speed" = 5
+# "Voice category" = "000000000000000000"
+# "Lobby channel" = "000000000000000000"
+# "Mute users who bypass speak permissions in the lobby" = true
+# [Network]
+# "Vertical Strength" = 40
+# "Horizontal Strength" = 80
+# "Falloff" = 5
+# "Channels are visible" = false
+
+# Hooks that are not used (case does not matter): "LuckPerms-GroupUpdates", "LuckPerms-Contexts", "LuckPerms",
+# "PlaceholderAPI", "Multiverse-Core", "SuperVanish", "Vault".
+# DisabledPluginHooks = []
+# Ask Discord for the privileged presences intent (switch it on for the bot in the Developer Portal first): the
+# placeholders user_online_status, user_game_name, linked_online ... then have an answer.
+# EnablePresenceInformation = false

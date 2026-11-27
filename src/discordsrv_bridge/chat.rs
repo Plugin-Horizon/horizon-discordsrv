@@ -28,6 +28,8 @@ pub enum FromDiscord {
 pub struct ChatFilters {
     pub game: Filters,
     pub discord: Filters,
+    /// `Experiment_WebhookChatMessageUsernameFilters`: regexes over the webhook's username.
+    pub webhook_username: Filters,
 }
 
 impl ChatFilters {
@@ -35,6 +37,7 @@ impl ChatFilters {
         Ok(ChatFilters {
             game: Filters::new(&chat.discord_chat_channel_game_filters)?,
             discord: Filters::new(&chat.discord_chat_channel_discord_filters)?,
+            webhook_username: Filters::new(&chat.experiment_webhook_chat_message_username_filters)?,
         })
     }
 }
@@ -229,6 +232,7 @@ pub fn discord_to_minecraft(
     let message = truncate(&message, limit);
     let message = if strip { strip_codes(&message) } else { translate_ampersand(&message) };
     let message = convert_text(chat, cache, d, &message);
+    let message = if chat.reserializer_to_minecraft { crate::discordsrv_bridge::format::markdown_to_legacy(&message) } else { message };
     let hide_emoji = chat.discord_chat_channel_emoji_behavior.eq_ignore_ascii_case("hide");
     let message = if hide_emoji { message.chars().filter(|c| !is_emoji(*c)).collect::<String>() } else { message };
     if !message.trim().is_empty() {
@@ -302,6 +306,8 @@ pub struct GameChat<'a> {
     pub display_name: &'a str,
     pub message: &'a str,
     pub primary_group: &'a str,
+    /// The world mod's alias for the player's world (the world's name when it has none): `%worldalias%`.
+    pub world_alias: &'a str,
     pub world: &'a str,
     pub date: &'a str,
     /// The game channel (`global`); `%channelname%` shows it with a capital.
@@ -311,7 +317,11 @@ pub struct GameChat<'a> {
 /// A player's chat message as the content of a Discord message, None when the prefix rule or a
 /// filter keeps it in the game.
 pub fn minecraft_to_discord(chat: &Chat, filters: &ChatFilters, cache: &Cache, m: &GameChat) -> Option<String> {
-    let message = strip_codes(m.message);
+    let message = if chat.reserializer_to_discord {
+        crate::discordsrv_bridge::format::legacy_to_markdown(m.message)
+    } else {
+        strip_codes(m.message)
+    };
     // As in DiscordSRV, an empty prefix with `PrefixActsAsBlacklist` keeps everything in the game.
     if message.starts_with(chat.discord_chat_channel_prefix_required_to_process_message.as_str())
         == chat.discord_chat_channel_prefix_acts_as_blacklist
@@ -340,7 +350,7 @@ pub fn minecraft_to_discord(chat: &Chat, filters: &ChatFilters, cache: &Cache, m
             ("username", &escape_markdown(&username)),
             ("displayname", &escape_markdown(&display)),
             ("primarygroup", m.primary_group),
-            ("worldalias", m.world),
+            ("worldalias", m.world_alias),
             ("world", m.world),
             ("date", m.date),
             ("time", m.date),
@@ -391,7 +401,7 @@ pub fn webhook_message(chat: &Chat, filters: &ChatFilters, cache: &Cache, m: &Ga
         chat.experiment_webhook_chat_message_username_format.as_str()
     };
     let mut name = fill(name_format, &[("displayname", &display), ("username", &username)]);
-    name = filters.game.apply(&name)?;
+    name = filters.webhook_username.apply_all(&name);
     let (discord_name, discord_username) = member.map_or((String::new(), String::new()), |m| {
         (m.effective_name().to_string(), m.username.clone())
     });
@@ -561,6 +571,17 @@ mod tests {
     }
 
     #[test]
+    fn webhook_username_filters_run_over_the_name_and_may_empty_it_to_nothing() {
+        let f = ChatFilters::new(&Chat {
+            experiment_webhook_chat_message_username_filters: vec![("(?i)admin".into(), "A".into())],
+            ..Chat::default()
+        })
+        .unwrap();
+        assert_eq!(f.webhook_username.apply_all("SuperAdmin"), "SuperA");
+        assert_eq!(f.webhook_username.apply_all("Steve"), "Steve");
+    }
+
+    #[test]
     fn long_messages_are_truncated_and_flagged() {
         let c = chat();
         let f = ChatFilters::new(&c).unwrap();
@@ -622,7 +643,7 @@ mod tests {
     }
 
     fn game<'a>(message: &'a str, group: &'a str) -> GameChat<'a> {
-        GameChat { username: "jeb_", display_name: "jeb_", message, primary_group: group, world: "world", date: "", channel: "global" }
+        GameChat { username: "jeb_", display_name: "jeb_", message, primary_group: group, world: "world", world_alias: "world", date: "", channel: "global" }
     }
 
     #[test]
@@ -665,7 +686,7 @@ mod tests {
         let mut c = chat();
         c.discord_chat_channel_prefix_required_to_process_message = "!".into();
         let f = ChatFilters::new(&c).unwrap();
-        let m = |message| GameChat { username: "a", display_name: "a", message, primary_group: "", world: "", date: "", channel: "global" };
+        let m = |message| GameChat { username: "a", display_name: "a", message, primary_group: "", world: "", world_alias: "", date: "", channel: "global" };
         assert!(minecraft_to_discord(&c, &f, &Cache::default(), &m("hi")).is_none());
         assert!(minecraft_to_discord(&c, &f, &Cache::default(), &m("!hi")).is_some());
         c.discord_chat_channel_prefix_acts_as_blacklist = true;
@@ -692,11 +713,11 @@ mod webhook_tests {
     }
 
     fn game(message: &str) -> GameChat<'_> {
-        GameChat { username: "jeb_", display_name: "Jeb", message, primary_group: "", world: "world", date: "", channel: "global" }
+        GameChat { username: "jeb_", display_name: "Jeb", message, primary_group: "", world: "world", world_alias: "world", date: "", channel: "global" }
     }
 
     fn member() -> Member {
-        Member { username: "jebdiscord".into(), global_name: None, nick: Some("Jeb D".into()), roles: vec![], avatar_url: String::new() }
+        Member { username: "jebdiscord".into(), global_name: None, nick: Some("Jeb D".into()), roles: vec![], avatar_url: String::new(), boosting: false }
     }
 
     fn pair(name: &str, content: &str) -> Option<(String, String)> {
@@ -748,7 +769,7 @@ mod webhook_tests {
         let c = chat();
         let f = ChatFilters::new(&c).unwrap();
         let long = "a".repeat(100);
-        let g = GameChat { username: "jeb_", display_name: &long, message: "hi", primary_group: "", world: "world", date: "", channel: "global" };
+        let g = GameChat { username: "jeb_", display_name: &long, message: "hi", primary_group: "", world: "world", world_alias: "world", date: "", channel: "global" };
         let (name, _) = webhook_message(&c, &f, &sample(), &g, None).unwrap();
         assert_eq!(name.chars().count(), 80);
     }

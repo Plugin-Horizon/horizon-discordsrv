@@ -14,9 +14,35 @@ use tungstenite::protocol::frame::coding::CloseCode;
 use crate::discordsrv_bridge::Shared;
 use crate::discordsrv_bridge::ws::{self, Connection};
 
-/// GUILDS, GUILD_MESSAGES, DIRECT_MESSAGES (link codes) and MESSAGE_CONTENT (privileged: turn
-/// it on for the bot). Not the privileged GUILD_MEMBERS: members are learned from messages.
-pub const INTENTS: u64 = 1 | (1 << 9) | (1 << 12) | (1 << 15);
+/// GUILDS, GUILD_MODERATION (ban synchronisation), GUILD_MESSAGES, DIRECT_MESSAGES (link codes) and MESSAGE_CONTENT (privileged: turn
+/// it on for the bot). The privileged GUILD_MEMBERS only when Discord's roles can decide the group synchronisation;
+/// otherwise members are learned from messages.
+pub const INTENTS: u64 = 1 | (1 << 2) | (1 << 9) | (1 << 12) | (1 << 15);
+
+/// GUILD_VOICE_STATES, which the voice module needs to see who sits in which voice channel.
+const VOICE_STATES_INTENT: u64 = 1 << 7;
+
+/// GUILD_PRESENCES (privileged), only when `EnablePresenceInformation` is set.
+const PRESENCES_INTENT: u64 = 1 << 8;
+
+/// GUILD_MEMBERS (privileged): role edits, which Discord -> Minecraft group synchronisation listens to.
+const MEMBERS_INTENT: u64 = 1 << 1;
+
+/// The intents of the Identify: [`INTENTS`], with the voice states when voice is on and the members intent
+/// when Discord's roles can decide the group synchronisation.
+pub fn intents(config: &crate::discordsrv_bridge::config::Config) -> u64 {
+    let mut bits = INTENTS;
+    if config.voice.enabled {
+        bits |= VOICE_STATES_INTENT;
+    }
+    if crate::discordsrv_bridge::sync::discord_can_win(config) {
+        bits |= MEMBERS_INTENT;
+    }
+    if config.enable_presence_information {
+        bits |= PRESENCES_INTENT;
+    }
+    bits
+}
 
 /// A message posted in the console channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,7 +150,7 @@ pub fn run(shared: Arc<Shared>, on_dispatch: impl Fn(&str, &Value)) {
             },
         };
         let url = format!("{}/?v=10&encoding=json", url.trim_end_matches('/'));
-        let outcome = match ws::connect(&url) {
+        let outcome = match ws::connect(&url, shared.config.proxy().as_ref()) {
             Ok(conn) => connection(&shared, conn, &mut session, &on_dispatch),
             Err(e) => {
                 log::warn!(target: "horizon_discordsrv", "[DiscordSRV] Gateway connection failed: {e}");
@@ -188,7 +214,7 @@ fn connection(
     } else {
         json!({ "op": 2, "d": {
             "token": shared.token,
-            "intents": INTENTS,
+            "intents": intents(&shared.config),
             "properties": { "os": std::env::consts::OS, "browser": "horizon-discordsrv", "device": "horizon-discordsrv" },
             "presence": presence(
                 status_entry(&shared.config.discord_game_status, shared.status_index.load(Ordering::Relaxed)),
@@ -341,6 +367,15 @@ mod tests {
 
     #[test]
     fn intents_are_guilds_messages_pms_and_content() {
-        assert_eq!(INTENTS, 37377);
+        assert_eq!(INTENTS, 37381);
+        let mut config = crate::discordsrv_bridge::config::Config::default();
+        assert_eq!(intents(&config), 37381);
+        config.voice.enabled = true;
+        assert_eq!(intents(&config), 37381 | 128);
+        config.chat.group_role_synchronization_groups_and_roles_to_sync.insert("vip".into(), "123456789012345678".into());
+        assert_eq!(intents(&config), 37381 | 128 | 2);
+        config.chat.group_role_synchronization_one_way = true;
+        config.chat.group_role_synchronization_minecraft_is_authoritative = true;
+        assert_eq!(intents(&config), 37381 | 128);
     }
 }

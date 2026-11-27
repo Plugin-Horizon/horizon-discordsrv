@@ -32,8 +32,20 @@ pub struct Rest {
 
 impl Rest {
     pub fn new(base: &str, token: &str) -> Rest {
+        Rest::with_proxy(base, token, None)
+    }
+
+    /// With `ProxyHost` and its siblings set, the requests go through that HTTP proxy.
+    pub fn with_proxy(base: &str, token: &str, proxy: Option<&crate::discordsrv_bridge::config::Proxy>) -> Rest {
+        let mut builder = ureq::AgentBuilder::new().timeout(Duration::from_secs(15));
+        if let Some(p) = proxy {
+            match ureq::Proxy::new(p.ureq_url()) {
+                Ok(proxy) => builder = builder.proxy(proxy),
+                Err(e) => log::error!(target: "horizon_discordsrv", "[DiscordSRV] Failed to generate a proxy from config options: {e}"),
+            }
+        }
         Rest {
-            agent: ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build(),
+            agent: builder.build(),
             base: base.trim_end_matches('/').to_string(),
             auth: format!("Bot {token}"),
             hooks: Mutex::new(HashMap::new()),
@@ -136,6 +148,69 @@ impl Rest {
 
     pub fn remove_role(&self, guild: &str, user: &str, role: &str) -> Result<(), String> {
         self.call("DELETE", &format!("/guilds/{guild}/members/{user}/roles/{role}"), None).map(drop)
+    }
+
+    /// The role IDs of a guild member; `None` when the user is not in the guild.
+    pub fn member_roles(&self, guild: &str, user: &str) -> Result<Option<Vec<String>>, String> {
+        match self.call("GET", &format!("/guilds/{guild}/members/{user}"), None) {
+            Ok(v) => Ok(Some(
+                v["roles"].as_array().map(|r| r.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+            )),
+            Err(e) if e.contains("HTTP 404") => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Sets a guild member's nickname.
+    pub fn set_nick(&self, guild: &str, user: &str, nick: &str) -> Result<(), String> {
+        self.call("PATCH", &format!("/guilds/{guild}/members/{user}"), Some(json!({ "nick": nick }))).map(drop)
+    }
+
+    /// Bans a Discord user from the guild (`DiscordUtil.banMember`); no messages are deleted.
+    pub fn ban_member(&self, guild: &str, user: &str) -> Result<(), String> {
+        self.call("PUT", &format!("/guilds/{guild}/bans/{user}"), Some(json!({ "delete_message_seconds": 0 }))).map(drop)
+    }
+
+    /// Takes a Discord user's ban back; an error (404) when they were not banned.
+    pub fn unban_member(&self, guild: &str, user: &str) -> Result<(), String> {
+        self.call("DELETE", &format!("/guilds/{guild}/bans/{user}"), None).map(drop)
+    }
+
+    /// A voice channel in a category with permission overwrites (`overwrites` is the JSON list the API takes);
+    /// the new channel's ID.
+    pub fn create_voice_channel(&self, guild: &str, name: &str, category: &str, overwrites: Value) -> Result<String, String> {
+        let body = json!({ "name": name, "type": 2, "parent_id": category, "permission_overwrites": overwrites });
+        let answer = self.call("POST", &format!("/guilds/{guild}/channels"), Some(body))?;
+        answer.get("id").and_then(Value::as_str).map(str::to_string).ok_or_else(|| "no channel id".into())
+    }
+
+    /// Moves a member out of / into a voice channel (`VOICE_MOVE_OTHERS`).
+    pub fn move_member(&self, guild: &str, user: &str, channel: &str) -> Result<(), String> {
+        self.call("PATCH", &format!("/guilds/{guild}/members/{user}"), Some(json!({ "channel_id": channel }))).map(drop)
+    }
+
+    /// Server-mutes or unmutes a member in voice.
+    pub fn set_member_mute(&self, guild: &str, user: &str, mute: bool) -> Result<(), String> {
+        self.call("PATCH", &format!("/guilds/{guild}/members/{user}"), Some(json!({ "mute": mute }))).map(drop)
+    }
+
+    pub fn delete_channel(&self, channel: &str) -> Result<(), String> {
+        self.call("DELETE", &format!("/channels/{channel}"), None).map(drop)
+    }
+
+    /// Sets one permission overwrite of a channel (`kind` 0: a role, 1: a member).
+    pub fn put_overwrite(&self, channel: &str, id: &str, kind: u8, allow: u64, deny: u64) -> Result<(), String> {
+        let body = json!({ "type": kind, "allow": allow.to_string(), "deny": deny.to_string() });
+        self.call("PUT", &format!("/channels/{channel}/permissions/{id}"), Some(body)).map(drop)
+    }
+
+    /// The guild with its approximate member and presence counts (`guild_members_online` / `_total`).
+    pub fn guild_counts(&self, guild: &str) -> Result<(u64, u64), String> {
+        let v = self.call("GET", &format!("/guilds/{guild}?with_counts=true"), None)?;
+        Ok((
+            v.get("approximate_presence_count").and_then(Value::as_u64).unwrap_or(0),
+            v.get("approximate_member_count").and_then(Value::as_u64).unwrap_or(0),
+        ))
     }
 
     /// One request; a 429 waits its `retry_after` and tries again (three times at most), a 5xx
